@@ -1,0 +1,514 @@
+diff --git a/README.md b/README.md
+index 5d16ed1..2cbd753 100644
+--- a/README.md
++++ b/README.md
+@@ -1,166 +1,126 @@
+-# pemu + built-in proot
++# pemu
+ 
+-proot uses `ptrace` to intercept guest syscalls. pemu already executes every guest syscall itself,
+-so path translation happens directly in the syscall layer: no ptrace, no tracer process, no external
+-`qemu`. One binary = emulator + chroot + bind mounts + fake root.
++User-mode emulator for Linux binaries with a built-in proot (chroot, bind mounts, fake root).
++No `ptrace`, no tracer process, no external `qemu`: guest paths are translated directly in the syscall layer.
+ 
+-## Usage
+-
+-    pemu login debian                     # enter a rootfs (bash -l, fake root, cwd /root)
+-    pemu login debian apt update          # run a single command
+-    pemu login -b $HOME:/mnt/home -w /mnt/home debian
+-    pemu install debian rootfs.tar.xz     # unpack a tarball (needs `tar`; strips one level automatically)
+-    pemu list
+-    pemu -r /path/rootfs -b /sdcard --root-id /bin/ls    # proot style, without `login`
+-
+-`NAME` is looked up in `$PEMU_ROOTFS_DIR`, `~/.pemu/rootfs`, `$PREFIX/var/lib/pemu/rootfs`
+-and `$PREFIX/var/lib/proot-distro/installed-rootfs` (proot-distro rootfs directories work as they are).
+-
+-| option | meaning |
+-|---|---|
+-| `-r DIR` | guest root file system |
+-| `-b SRC[:DST]` | bind mount (repeatable) |
+-| `-w DIR` | initial guest directory |
+-| `--root-id` | fake uid/gid 0 (this is `-0` in proot; in pemu `-0` is still argv0, as in qemu) |
+-| `--no-default-binds` | do not bind `/dev /proc /sys` |
+-| `login -e VAR=val` | guest environment variable |
+-
+-`login` also fills in `/etc/resolv.conf` (when it is empty, a symlink, or has no usable non-loopback nameserver) and `/etc/hosts` (when empty), and writes
+-`APT::Sandbox::User "root"` so apt does not try to switch to the `_apt` user.
+-
+-Environment variables:
+-
+-| variable | effect |
+-|---|---|
+-| `PEMU_ROOTFS_DIR` | extra place to look for (and install) rootfs directories |
+-| `PEMU_SECURE_OPEN=0/1` | force the race-free `openat2` open path off/on (default: on, off on Android) |
+-| `PEMU_FAKE_PROC=1` | always serve the fake `/proc` files, even if the real ones can be read |
+-
+-## Install from a .deb
+-
+-Every push to GitHub builds `.deb` packages (see *Actions → Artifacts*); a `vX.Y.Z` tag also
+-publishes them under *Releases*.
+-
+-    # Debian / Ubuntu (amd64, arm64)
+-    sudo apt install ./pemu_<version>_debian_<arch>.deb
+-
+-    # Termux (aarch64)
+-    apt install ./pemu_<version>_termux_aarch64.deb      # or: dpkg -i ...
+-
+-On an amd64 host `pemu` = AArch64 guest; on an arm64 / Termux host `pemu` = x86_64 guest.
+-
+-## Source layout (modelled on qemu-user)
+-
+-`pemu.c` and `pemu_x64.c` are thin entry files. They include the parts in dependency order, so each program is a
+-single translation unit.
++| binary | guest | host |
++|---|---|---|
++| `pemu` | AArch64 | x86_64 (e.g. Debian/Ubuntu amd64) |
++| `pemu` | x86_64 | aarch64 (e.g. Termux, Debian arm64) |
++| `pemu_x64` | x86_64 | aarch64 (also builds on x86_64, for testing) |
+ 
+-    target/<guest>/      guest CPU: state, decoder, interpreter (SSE/MMX/x87/FP/SIMD)      ~ qemu target/i386, target/arm
+-    tcg/<host>/          JIT back end (x86_64 guest -> tcg/aarch64, AArch64 guest -> tcg/x86_64)  ~ qemu tcg/
+-    linux-user/<guest>/  syscall translation, signals, ELF loader, cpu_loop, main          ~ qemu linux-user/
+-    linux-user/pemu_root.h   built-in proot: umbrella header that includes linux-user/proot/*.inc.h   ~ qemu util/path.c (-L)
+-    tests/               unit / end-to-end tests, plus embed_hook.inc.h (test-only hook, see below)
++Version: see `VERSION` (`pemu --version`). License: Apache-2.0 (`LICENSE`).
+ 
+-Files named `*.inc.h` are **fragments**: they have no include guard, are not self-contained and must only be included, in
+-order, from `pemu.c` / `pemu_x64.c` (or from the `tests/check_core_*.c` checks). `pemu_root.h` is the only regular header;
+-it is the one the unit tests include.
++## Install
+ 
+-Both JIT back ends use the same split: `tcg_target` (overview, configuration), `emit` (instruction encoders), `guest_state`,
+-`block_cache`, then the translators (`decode` / `codegen` / `translate` in `tcg/aarch64`; `helpers` / `ldst` / `dataproc` /
+-`translate` in `tcg/x86_64`).
++From a `.deb` (every push builds them under *Actions → Artifacts*; a `vX.Y.Z` tag publishes them under *Releases*):
+ 
+-`linux-user/proot/` splits the built-in proot by topic, in dependency order: `state` (globals, logging, fake ids), `bind`
+-(path normalisation, bind table), `link2symlink`, `path` (guest path walk), `secure_walk` (race-free `openat2` walks),
+-`syscall_helpers`, `fake_proc`, `open`, `socket`, `exec`, `mount`, `fake_id`, `kompat` (`-k`), `exit`, `setup`, `cmdline`
+-and `subcmd` (`login` / `install` / `list`).
++    sudo apt install ./pemu_<version>_debian_<arch>.deb        # Debian / Ubuntu (amd64, arm64)
++    apt install ./pemu_<version>_termux_aarch64.deb            # Termux (or: dpkg -i ...)
+ 
+-`tests/embed_hook.inc.h` is only compiled with `-DPEMU_EMBED`. It lets the AArch64 interpreter in `pemu` execute the code
+-that the AArch64 JIT back end of `pemu_x64` generates, so that back end can be tested on an x86_64 machine. `build.sh` does
+-not enable it.
++From source (needs a C compiler; tests need clang + lld for the end-to-end part, otherwise it is skipped):
+ 
+-### CPU core and OS layer are separate
++    ./build.sh            # output in ./build (pemu, pemu_x64); runs the tests
++    SKIP_TESTS=1 CC=... ARCH=aarch64 ./build.sh               # cross build
+ 
+-`target/` and `tcg/` (the CPU core and the JIT) never call into `linux-user/` by name. Everything that needs an operating
+-system goes through one table, `PemuOS` (end of `target/<guest>/cpu.inc.h`), which `linux-user/<guest>/cpu_loop.inc.h` installs
+-before `main()`. This is the hand-off qemu-user does when `cpu_exec()` returns an exception to `cpu_loop()`.
++`tar` (and `xz-utils` for `.tar.xz`) is needed for `pemu install`.
+ 
+-| callback | called by the core when | Linux layer does |
+-|---|---|---|
+-| `syscall(c)` | guest runs `syscall` (x86_64) / `svc` (AArch64), interpreter or JIT | `do_syscall` / `do_svc` |
+-| `exception(c, e)` | divide error `EXCP_DE`, `int3` `EXCP_BP`, unsupported instruction `EXCP_UD`, privileged instruction `EXCP_GP` (x86_64); `EXCP_BRK`, `EXCP_UDEF` (AArch64) | raises the matching signal, or delivers it to the guest handler |
+-| `pending(c)` (AArch64) | the JIT sees the exit-request word `pend` set | `check_pending`: deliver queued guest signals |
+-| `host_fault(c)` (AArch64) | a host fault in translated code comes back through `g_jb` | `linux_host_fault`: make it a guest signal |
++## Uninstall
+ 
+-The exit-request words (`pend`, `tpend`, `PENDP()`), `g_jb` and the CPU model identity (`PEMU_BRAND`) belong to the core; the
+-OS layer only sets or reads them. `tests/check_core_*.c` compile the core without `linux-user/`, and `build.sh` runs that
+-check, so a new direct dependency fails the build.
++    sudo apt remove pemu          # Debian / Ubuntu
++    apt remove pemu               # Termux
+ 
+-## Build
++Removing the package does **not** delete installed rootfs. Delete those first with `pemu uninstall NAME`
++(see below), or remove `~/.pemu/rootfs` by hand.
+ 
+-    ./build.sh        # pemu / pemu_x64 + resolver tests, output in ./build
+-
+-`pemu` = AArch64 guest on an x86_64 host. `pemu_x64` = x86_64 guest on an aarch64 host (Termux).
+-`build.sh` honours `CC`, `ARCH`, `OUT` and `SKIP_TESTS=1` (for cross builds).
++## Usage
+ 
+-## Tests
++    pemu login debian                       # enter a rootfs (bash -l, fake root, cwd /root)
++    pemu login debian apt update            # run one command
++    pemu login -b $HOME:/mnt/home -w /mnt/home debian
++    pemu install debian rootfs.tar.xz       # unpack a tarball (strips one top-level dir automatically)
++    pemu list                               # installed rootfs
++    pemu uninstall debian                   # delete a rootfs (asks first; -y to skip the question)
++    pemu -r /path/rootfs -b /sdcard --root-id /bin/ls       # proot style, without `login`
+ 
+-`./build.sh` runs `tests/test_pemu_root.c` (resolver, `RESOLVE_*`, sockets, fake `/proc`, symlink-race stress)
+-and `tests/e2e.sh`, which builds one freestanding guest (`tests/e2e_guest.c`, raw syscalls) with clang and runs
+-it as an AArch64 guest under `pemu` and as an x86_64 guest under `pemu_x64`, comparing the output with
+-`tests/e2e.expected`. The end-to-end part needs an x86_64 host with clang and lld and is skipped otherwise.
++`NAME` is looked up in `$PEMU_ROOTFS_DIR`, `~/.pemu/rootfs`, `$PREFIX/var/lib/pemu/rootfs` and
++`$PREFIX/var/lib/proot-distro/installed-rootfs` (proot-distro rootfs directories work as they are).
++`pemu install` unpacks into `$PEMU_ROOTFS_DIR` if set, otherwise `~/.pemu/rootfs`.
+ 
+-## What is translated
++### Sub-commands
+ 
+-open/openat/openat2 (including `RESOLVE_*`), stat/lstat/statx/newfstatat, access, mkdir, rmdir, unlink,
+-rename(2), link, symlink, readlink, chmod/fchmodat2, chown, utime*, mknod, truncate, statfs, xattr,
+-inotify_add_watch, chdir/fchdir/getcwd, execve (including `#!` scripts), `/proc/self/exe|cwd|fd/N`.
++| command | meaning |
++|---|---|
++| `login [options] NAME\|DIR [cmd [args...]]` | enter a rootfs; default command is `bash -l` |
++| `install NAME TARBALL [--strip N]` | unpack a rootfs tarball; `--strip N` overrides the automatic choice |
++| `uninstall NAME [-y]` (aliases `remove`, `rm`) | delete the rootfs `NAME` |
++| `list` | list rootfs found in the lookup directories |
+ 
+-AF_UNIX socket paths are translated in both directions: `bind`, `connect`, `sendto`, `sendmsg` and
+-`sendmmsg` map guest paths to host paths; `getsockname`, `getpeername`, `recvfrom`, `recvmsg`, `accept`
+-and `accept4` map the returned addresses back to guest paths. Host paths longer than `sun_path`
+-(108 bytes) are reached through `/proc/self/fd/N/…`.
++`login` options: `-b/--bind SRC[:DST]` (repeatable), `-w/--cwd DIR`, `-e/--env VAR=val` (repeatable),
++`--no-root-id` (do not fake uid/gid 0), `--no-default-binds` (do not bind `/dev /proc /sys`).
+ 
+-Absolute symlinks and `..` are resolved inside the rootfs, so they cannot lead out to the host.
++`login` also fills in `/etc/resolv.conf` (when it is empty, a symlink, or has no non-loopback nameserver) and
++`/etc/hosts` (when empty), and writes `APT::Sandbox::User "root"` so apt does not try to switch to `_apt`.
+ 
+-### openat2 `RESOLVE_*`
++`uninstall` takes a plain name (no `/`, `.` or `..`), never follows symlinks (a symlinked rootfs only loses the link),
++makes read-only directories writable before deleting, and leaves directories on another device (a real mount) alone.
++Without `-y` it asks on the terminal and refuses when stdin is not a terminal.
+ 
+-`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH` and `RESOLVE_IN_ROOT` are enforced by the guest-side path walk
+-(guest symlinks, not host ones). `RESOLVE_NO_MAGICLINKS` and `RESOLVE_CACHED` are passed to the host.
+-`RESOLVE_NO_XDEV` is accepted but not enforced. Unknown bits fail with `EINVAL`.
++### Options (proot style, `pemu [options] program [args...]`)
+ 
+-### Race-free walks
++| option | meaning |
++|---|---|
++| `-r, --rootfs DIR` | guest root file system |
++| `-b, --bind SRC[:DST]`, `-m, --mount` | bind mount (repeatable) |
++| `-w, --cwd DIR`, `--pwd` | initial guest directory |
++| `--root-id` | fake uid/gid 0 (this is proot's `-0`; here `-0` is qemu's argv0) |
++| `-i, --change-id UID[:GID]` | fake uid/gid |
++| `-k, --kernel-release R` | fake `uname -r` |
++| `-l, --link2symlink` | emulate hard links with symlinks |
++| `--kill-on-exit` | kill leftover guest processes when the main one exits |
++| `--no-default-binds` | do not bind `/dev /proc /sys` |
++| `-v, --verbose N` | log level |
++| `-0 ARGV0`, `-E VAR=val`, `-U VAR`, `-strace`, `-jit` / `-nojit` | qemu-style options |
++| `--version`, `-h/--help` | |
+ 
+-The guest walk validates a path, but the host kernel walks the translated path again, so a guest thread
+-could swap a directory for a symlink in between. For paths inside the rootfs the last step therefore goes
+-through `openat2(rootfd, path, RESOLVE_IN_ROOT)`, which keeps the kernel's own walk inside the rootfs.
+-This covers `open*` and the calls that change things: mkdir, unlink, rmdir, rename, link, symlink, mknod,
+-chmod, chown, utimes, truncate, setxattr/removexattr and chdir. Read-only calls (stat, access, readlink,
+-getxattr, ...) stay on the faster plain path. Needs Linux 5.6+ and `/proc`; without `openat2` the plain
+-path is used. A stress test (`tests/test_pemu_root.c`) swaps a directory and a symlink in a loop:
+-thousands of escapes with the plain walk, none with the race-free one.
++Value options also accept `--name=value`. `-L -cpu -s -g -R` are accepted and ignored (qemu compatibility).
+ 
+-### Fake `/proc`
++### Environment
+ 
+-If the real file cannot be opened (typical on Android 8+), `/proc/stat`, `/proc/loadavg`,
+-`/proc/uptime`, `/proc/version`, `/proc/vmstat` and `/proc/sys/kernel/cap_last_cap` are served from an
+-in-memory file with plausible values. They are read-only snapshots taken at `open` time.
++| variable | effect |
++|---|---|
++| `PEMU_ROOTFS_DIR` | extra place to look for (and install) rootfs directories |
++| `PEMU_SECURE_OPEN=0/1` | race-free `openat2` open path off/on (default: on, off on Android) |
++| `PEMU_FAKE_PROC=1` | always serve the fake `/proc` files, even if the real ones can be read |
++| `PEMU_JIT=0` | run the interpreter instead of the JIT |
++| `QEMU_STRACE=1` | trace guest syscalls (same as `-strace`) |
++| `QEMU_SET_ENV`, `QEMU_UNSET_ENV` | comma separated `VAR=val` / `VAR` list applied to the guest environment |
++
++## Translated
++
++open/openat/openat2 (with `RESOLVE_*`), stat/lstat/statx/newfstatat, access, mkdir, rmdir, unlink, rename, link,
++symlink, readlink, chmod/fchmodat2, chown, utime*, mknod, truncate, statfs, xattr, inotify_add_watch,
++chdir/fchdir/getcwd, execve (including `#!` scripts), `/proc/self/exe|cwd|fd/N`, AF_UNIX socket paths in both
++directions (host paths longer than `sun_path` go through `/proc/self/fd/N/…`). Absolute symlinks and `..` are
++resolved inside the rootfs.
++
++- `openat2`: `RESOLVE_NO_SYMLINKS`, `BENEATH`, `IN_ROOT` are enforced on the guest path; `NO_MAGICLINKS`, `CACHED` go
++  to the host; `NO_XDEV` is accepted but not enforced; unknown bits fail with `EINVAL`.
++- Race-free walk: for paths inside the rootfs the last step uses `openat2(rootfd, path, RESOLVE_IN_ROOT)` (open and the
++  mutating calls: mkdir, unlink, rmdir, rename, link, symlink, mknod, chmod, chown, utimes, truncate, xattr, chdir).
++  Needs Linux 5.6+ and `/proc`.
++- Fake `/proc`: when the real file cannot be opened (typical on Android 8+), `/proc/stat`, `loadavg`, `uptime`,
++  `version`, `vmstat` and `sys/kernel/cap_last_cap` are served from memory (read-only snapshot taken at `open`).
++- `mount -o bind` / `umount` edit pemu's bind table (this process tree only). Other mount types are rejected.
++- `chroot(dir)` works (binds below it are kept, the others hidden, cwd clamped); call it from a single thread.
+ 
+ ## Limitations
+ 
+ - Not a security boundary: read-only calls (stat, access, readlink, ...) can still race on symlinks, `execve`
+-  resolves its file separately, raw binds (`/dev /proc /sys`) are resolved by the host kernel, syscalls
+-  that are not translated see host paths, and the race-free walk is off by default on Android.
+-- Still untranslated: `execveat` through an already closed fd, abstract and unnamed AF_UNIX addresses (they have
+-  no path; the abstract namespace is the host's), and the `/proc/self/fd/N/name` form of a long socket path in
+-  `getsockname` results. `pivot_root` is refused (EPERM).
+-- Fake `/proc` files can be `stat`ed (`stat`/`newfstatat`/`statx`: regular file, mode 0444, size 0) when the real ones
+-  are hidden.
+-- `mount -o bind` / `umount` work: they edit pemu's bind table (this process tree only; the host is not touched,
+-  read-only/nosuid flags are not enforced). Every other `mount` type and `umount` of something that is not a bind
+-  are rejected (EPERM / EINVAL).
+-- `chroot(dir)` works: dir becomes the guest root, binds below it are kept (re-rooted), the others are hidden, the cwd
+-  is clamped. Do it from a single thread: other threads walking paths during the switch may briefly see a mix.
++  resolves its file separately, raw binds (`/dev /proc /sys`) are resolved by the host kernel, untranslated syscalls
++  see host paths, and the race-free walk is off by default on Android.
++- Untranslated: `execveat` through a closed fd, abstract/unnamed AF_UNIX addresses, `fanotify_mark`; `pivot_root`
++  is refused (`EPERM`).
+ - Fake root is cosmetic: files owned by the host user appear as uid 0, `chown`/`setuid` always succeed.
+-
+-## License
+-
+-Apache-2.0, see `LICENSE`.
++- Fake `/proc` files report mode 0444, size 0 on `stat`.
++- Only a small freestanding guest is covered by the end-to-end test; see `REVIEW.md` for what is not verified.
+diff --git a/linux-user/aarch64/main.inc.h b/linux-user/aarch64/main.inc.h
+index 5cc4de4..f8ba144 100644
+--- a/linux-user/aarch64/main.inc.h
++++ b/linux-user/aarch64/main.inc.h
+@@ -1,7 +1,7 @@
+ /* linux-user/aarch64/main.inc.h - command line, process setup, main. SPDX-License-Identifier: Apache-2.0 */
+ int main(int argc, char**argv, char**envp) {
+     const char*argv0 = NULL; int a = 1, pr, nojit = getenv("PEMU_JIT") && !strcmp(getenv("PEMU_JIT"), "0");
+-    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / list */
++    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / uninstall / list */
+     for (; a < argc && argv[a][0] == '-' && argv[a][1]; a++) {
+         const char*o = argv[a];
+         if (!strcmp(o, "--")) { a++; break; }
+diff --git a/linux-user/proot/subcmd.inc.h b/linux-user/proot/subcmd.inc.h
+index 9a6b39d..a07fcc6 100644
+--- a/linux-user/proot/subcmd.inc.h
++++ b/linux-user/proot/subcmd.inc.h
+@@ -1,5 +1,5 @@
+-/* linux-user/proot/subcmd.inc.h - sub-commands: login / install / list. Fragment of pemu_root.h (not self-contained). SPDX-License-Identifier: Apache-2.0 */
+-/* ---- sub-commands: login / install / list */
++/* linux-user/proot/subcmd.inc.h - sub-commands: login / install / uninstall / list. Fragment of pemu_root.h (not self-contained). SPDX-License-Identifier: Apache-2.0 */
++/* ---- sub-commands: login / install / uninstall / list */
+ static const char *pemu_dirs(int i, char *buf, size_t sz) {
+     const char *e = getenv("PEMU_ROOTFS_DIR"), *h = getenv("HOME"), *pf = getenv("PREFIX");
+     switch (i) {
+@@ -20,19 +20,44 @@ static int pemu_find_rootfs(const char *name, char *out, size_t sz) {
+     }
+     return pemu_isdir(name) ? (snprintf(out, sz, "%s", name), 0) : -1;
+ }
+-static void pemu_usage(void) {
++static void pemu_usage(FILE *f) {
+     fputs("pemu - user-mode emulator with a built-in proot\n\n"
+-          "  pemu login [options] NAME|DIR [command [args...]]   enter a rootfs (default: bash -l, fake root)\n"
+-          "      -b, --bind SRC[:DST]   bind a host path into the guest (repeatable)\n"
+-          "      -w, --cwd DIR          start directory (default /root)\n"
+-          "      -e, --env VAR=val      set a guest environment variable\n"
+-          "          --no-root-id       do not pretend to be root\n"
+-          "          --no-default-binds do not bind /dev /proc /sys\n"
+-          "  pemu install NAME TARBALL [--strip N]                unpack a rootfs tarball (tar must be installed)\n"
+-          "  pemu list                                            list installed rootfs\n"
+-          "  pemu [-r DIR] [-b SRC[:DST]] [-w DIR] [--root-id] [qemu-style options] program [args...]\n\n"
++          "usage:\n"
++          "  pemu login [options] NAME|DIR [command [args...]]\n"
++          "        enter a rootfs (default command: bash -l, fake root, cwd /root)\n"
++          "      -b, --bind SRC[:DST]    bind a host path into the guest (repeatable)\n"
++          "      -w, --cwd DIR           start directory (default /root)\n"
++          "      -e, --env VAR=val       set a guest environment variable (repeatable)\n"
++          "          --no-root-id        do not pretend to be root (uid/gid stay the host's)\n"
++          "          --no-default-binds  do not bind /dev /proc /sys\n"
++          "  pemu install NAME TARBALL [--strip N]\n"
++          "        unpack a rootfs tarball into $PEMU_ROOTFS_DIR or ~/.pemu/rootfs (needs tar)\n"
++          "        --strip N: leading path components to drop (default: automatic)\n"
++          "  pemu uninstall NAME [-y]          (aliases: remove, rm)\n"
++          "        delete an installed rootfs; asks for confirmation unless -y/--yes is given\n"
++          "  pemu list\n"
++          "        list installed rootfs\n"
++          "  pemu [options] program [args...]      proot-style, without `login`\n"
++          "      -r, --rootfs DIR        guest root file system\n"
++          "      -b, --bind SRC[:DST]    bind mount (also -m, --mount)\n"
++          "      -w, --cwd DIR           initial guest directory (also --pwd)\n"
++          "          --root-id           fake uid/gid 0 (proot's -0; here -0 is qemu's argv0)\n"
++          "      -i, --change-id U[:G]   fake uid/gid\n"
++          "      -k, --kernel-release R  fake `uname -r`\n"
++          "      -l, --link2symlink      emulate hard links with symlinks\n"
++          "          --kill-on-exit      kill leftover guest processes when the main one exits\n"
++          "          --no-default-binds  do not bind /dev /proc /sys\n"
++          "      -v, --verbose N         log level\n"
++          "      -0 ARGV0  -E VAR=val  -U VAR  -strace  -jit / -nojit    qemu-style options\n"
++          "      --version, -h/--help\n\n"
+           "NAME is looked up in $PEMU_ROOTFS_DIR, ~/.pemu/rootfs, $PREFIX/var/lib/pemu/rootfs and\n"
+-          "$PREFIX/var/lib/proot-distro/installed-rootfs.\n", stderr);
++          "$PREFIX/var/lib/proot-distro/installed-rootfs.\n\n"
++          "environment:\n"
++          "  PEMU_ROOTFS_DIR=DIR     extra rootfs directory (first choice for install)\n"
++          "  PEMU_SECURE_OPEN=0|1    race-free openat2 path off/on (default on, off on Android)\n"
++          "  PEMU_FAKE_PROC=1        always serve the fake /proc files\n"
++          "  PEMU_JIT=0              use the interpreter instead of the JIT\n"
++          "  QEMU_STRACE=1           trace guest syscalls (same as -strace)\n", f);
+ }
+ /* 1 when resolv.conf holds at least one nameserver that is not loopback (nothing listens on 127.x inside a guest) */
+ static int pemu_resolv_usable(const char *path) {
+@@ -69,10 +94,10 @@ static int pemu_login(int *pargc, char ***pargv) {
+         else if ((!strcmp(o, "-e") || !strcmp(o, "--env")) && i + 1 < argc && ne < 64) env[ne++] = argv[++i];
+         else if (!strcmp(o, "--no-root-id")) rootid = 0;
+         else if (!strcmp(o, "--no-default-binds")) nodef = 1;
+-        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(); return 0; }
++        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(stdout); return 0; }
+         else { fprintf(stderr, "pemu login: unknown option %s\n", o); return 2; }
+     }
+-    if (i >= argc) { pemu_usage(); return 2; }
++    if (i >= argc) { pemu_usage(stderr); return 2; }
+     char root[PATH_MAX];
+     if (pemu_find_rootfs(argv[i], root, sizeof root) < 0) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", argv[i]); return 1; }
+     i++;
+@@ -153,7 +178,7 @@ static int pemu_install(int argc, char **argv) {
+         if (!strcmp(argv[i], "--strip") && i + 1 < argc) strip = atoi(argv[++i]);
+         else if (!name) name = argv[i]; else if (!tb) tb = argv[i];
+     }
+-    if (!name || !tb || strchr(name, '/')) { pemu_usage(); return 2; }
++    if (!name || !tb || strchr(name, '/')) { pemu_usage(stderr); return 2; }
+     char b[PATH_MAX], dest[PATH_MAX]; const char *d = pemu_dirs(0, b, sizeof b);
+     if (!d) d = pemu_dirs(1, b, sizeof b);
+     if (!d) { fputs("pemu: set HOME or PEMU_ROOTFS_DIR\n", stderr); return 1; }
+@@ -192,13 +217,82 @@ static int pemu_install(int argc, char **argv) {
+     else fprintf(stderr, "pemu: done. enter with: pemu login %s\n", name);
+     return rc ? 1 : 0;
+ }
++/* ---- uninstall: delete a rootfs by name.  fd-based walk: symlinks are never followed (they are unlinked), directories that
++ * belong to another device (a real mount inside the rootfs) are left alone, and read-only directories are made writable first. */
++static int pemu_rm_children(int dfd, dev_t dev, int depth) {   /* consumes dfd */
++    int bad = 0;
++    DIR *dp = fdopendir(dfd); if (!dp) { close(dfd); return 1; }
++    int fd = dirfd(dp);
++    struct dirent *e;
++    while ((e = readdir(dp))) {
++        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
++        struct stat st;
++        if (fstatat(fd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) { bad = 1; continue; }
++        if (S_ISDIR(st.st_mode)) {
++            if (st.st_dev != dev || depth >= 512) { fprintf(stderr, "pemu: skipping %s (%s)\n", e->d_name, st.st_dev != dev ? "other device, is something mounted there?" : "too deep"); bad = 1; continue; }
++            int sub = openat(fd, e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++            if (sub < 0 && errno == EACCES && fchmodat(fd, e->d_name, 0700, 0) == 0) sub = openat(fd, e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++            if (sub < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; continue; }
++            fchmod(sub, 0700);                              /* a 0555 directory from a tarball would block unlinkat */
++            if (pemu_rm_children(sub, dev, depth + 1)) bad = 1;
++            if (unlinkat(fd, e->d_name, AT_REMOVEDIR) < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; }
++        } else if (unlinkat(fd, e->d_name, 0) < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; }
++    }
++    closedir(dp);
++    return bad;
++}
++static int pemu_uninstall(int argc, char **argv) {
++    const char *name = NULL; int yes = 0;
++    for (int i = 2; i < argc; i++) {
++        if (!strcmp(argv[i], "-y") || !strcmp(argv[i], "--yes")) yes = 1;
++        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { pemu_usage(stdout); return 0; }
++        else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "pemu uninstall: unknown option %s\n", argv[i]); return 2; }
++        else if (!name) name = argv[i];
++        else { pemu_usage(stderr); return 2; }
++    }
++    if (!name) { pemu_usage(stderr); return 2; }
++    if (!*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
++        fputs("pemu uninstall: NAME must be a plain rootfs name, not a path (see: pemu list)\n", stderr); return 2;
++    }
++    char b[PATH_MAX], target[PATH_MAX]; struct stat st; int found = 0;
++    for (int i = 0; i < 4 && !found; i++) {
++        const char *d = pemu_dirs(i, b, sizeof b); if (!d) continue;
++        char rd[PATH_MAX]; if (!realpath(d, rd) || !strcmp(rd, "/")) continue;     /* never operate directly under / */
++        size_t rl = strlen(rd), nl = strlen(name);
++        if (rl + 1 + nl >= sizeof target) continue;
++        memcpy(target, rd, rl); target[rl] = '/'; memcpy(target + rl + 1, name, nl + 1);
++        if (lstat(target, &st) == 0) found = 1;
++    }
++    if (!found) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", name); return 1; }
++    if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) { fprintf(stderr, "pemu: %s is not a directory\n", target); return 1; }
++    if (!yes) {
++        if (!isatty(0)) { fputs("pemu: refusing to delete without confirmation (stdin is not a terminal); use -y\n", stderr); return 1; }
++        fprintf(stderr, "Delete rootfs '%s' (%s%s) and everything in it? [y/N] ", name, target, S_ISLNK(st.st_mode) ? ", symlink: only the link is removed" : "");
++        char ans[16] = ""; if (!fgets(ans, sizeof ans, stdin) || (ans[0] != 'y' && ans[0] != 'Y')) { fputs("pemu: cancelled\n", stderr); return 1; }
++    }
++    if (S_ISLNK(st.st_mode)) {
++        if (unlink(target) < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); return 1; }
++        fprintf(stderr, "pemu: removed link %s (its target was left in place)\n", target); return 0;
++    }
++    int fd = open(target, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    if (fd < 0 && errno == EACCES && chmod(target, 0700) == 0) fd = open(target, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    if (fd < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); return 1; }
++    struct stat ds; if (fstat(fd, &ds) < 0) { close(fd); return 1; }
++    fchmod(fd, 0700);
++    int bad = pemu_rm_children(fd, ds.st_dev, 0);
++    if (rmdir(target) < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); bad = 1; }
++    if (bad) fprintf(stderr, "pemu: %s was not removed completely\n", target);
++    else fprintf(stderr, "pemu: removed %s\n", target);
++    return bad ? 1 : 0;
++}
+ /* entry for main(): handles the sub-commands. -1 = go on with the new argc/argv */
+ static int pemu_subcmd(int *pargc, char ***pargv) {
+     if (*pargc < 2) return -1;
+     const char *c = (*pargv)[1];
+     if (!strcmp(c, "login"))   return pemu_login(pargc, pargv);
+     if (!strcmp(c, "install")) return pemu_install(*pargc, *pargv);
++    if (!strcmp(c, "uninstall") || !strcmp(c, "remove") || !strcmp(c, "rm")) return pemu_uninstall(*pargc, *pargv);
+     if (!strcmp(c, "list"))    return pemu_list();
+-    if (!strcmp(c, "--help") || !strcmp(c, "-h")) { pemu_usage(); return 0; }
++    if (!strcmp(c, "--help") || !strcmp(c, "-h")) { pemu_usage(stdout); return 0; }
+     return -1;
+ }
+diff --git a/linux-user/x86_64/main.inc.h b/linux-user/x86_64/main.inc.h
+index cb2162b..7118545 100644
+--- a/linux-user/x86_64/main.inc.h
++++ b/linux-user/x86_64/main.inc.h
+@@ -1,7 +1,7 @@
+ /* linux-user/x86_64/main.inc.h - command line, process setup, main. SPDX-License-Identifier: Apache-2.0 */
+ int main(int argc, char**argv) {
+     const char*argv0 = NULL; int a = 1, pr, nojit = 0;
+-    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / list */
++    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / uninstall / list */
+ #ifdef HAVE_JIT
+     { const char*ev = getenv("PEMU_JIT"); if (ev && !strcmp(ev, "0")) nojit = 1; }
+ #else
+diff --git a/packaging/build-deb.sh b/packaging/build-deb.sh
+index 53ab571..dfeda29 100755
+--- a/packaging/build-deb.sh
++++ b/packaging/build-deb.sh
+@@ -1,5 +1,6 @@
+ #!/bin/sh
+ # usage: packaging/build-deb.sh <debian|termux> <deb-arch> <version> <bindir> <outdir>
++#   optional: PEMU_HOMEPAGE=https://... adds a Homepage: field to the package
+ #   debian: /usr/bin/pemu, /usr/bin/pemu_x64        (arch: amd64 | arm64)
+ #   termux: $TERMUX_PREFIX/bin/...                  (arch: aarch64)
+ set -e
+@@ -27,7 +28,7 @@ size=$(du -sk "$root$prefix" | cut -f1)
+   echo "Installed-Size: $size"
+   echo "Depends: $deps"
+   [ -z "$rec" ] || echo "Recommends: $rec"
+-  echo "Homepage: https://github.com/OWNER/pemu"
++  [ -z "$PEMU_HOMEPAGE" ] || echo "Homepage: $PEMU_HOMEPAGE"
+   echo "Description: user-space CPU emulator with built-in proot (chroot, bind mounts, fake root)"
+   echo " pemu runs foreign-architecture Linux rootfs images without ptrace or qemu."
+   echo " Guest paths are translated directly in the syscall layer."
+diff --git a/tests/test_pemu_root.c b/tests/test_pemu_root.c
+index 3cbd0bc..fa46b62 100644
+--- a/tests/test_pemu_root.c
++++ b/tests/test_pemu_root.c
+@@ -243,6 +243,22 @@ int main(void) {
+         r = pemu_chroot("/etc"); CHECK(r == 0, "nested chroot r=%ld", r);
+         want(AT_FDCWD, "/j", 1, "/tmp/pemu-test/rf/jail/etc/j");
+     }
++    /* ---- pemu uninstall */
++    {
++        system("rm -rf /tmp/pemu-test/rfs; mkdir -p /tmp/pemu-test/rfs/deb/usr/bin /tmp/pemu-test/rfs/deb/ro/sub /tmp/pemu-test/keep && touch /tmp/pemu-test/keep/f /tmp/pemu-test/rfs/deb/usr/bin/sh /tmp/pemu-test/rfs/deb/ro/sub/f"
++               " && ln -s /tmp/pemu-test/keep /tmp/pemu-test/rfs/deb/outside && ln -s /tmp/pemu-test/rfs/deb /tmp/pemu-test/rfs/lnk && mkdir -p /tmp/pemu-test/rfs/other/usr && chmod 555 /tmp/pemu-test/rfs/deb/ro/sub /tmp/pemu-test/rfs/deb/ro");
++        setenv("PEMU_ROOTFS_DIR", "/tmp/pemu-test/rfs", 1);
++        FILE *nul = freopen("/dev/null", "r", stdin); (void) nul;       /* stdin is not a terminal: confirmation must be refused */
++        { char *u[] = { "pemu", "uninstall", "deb" }; CHECK(pemu_uninstall(3, u) == 1 && pemu_isdir("/tmp/pemu-test/rfs/deb"), "uninstall without -y must refuse"); }
++        { char *u[] = { "pemu", "uninstall", "../keep", "-y" }; CHECK(pemu_uninstall(4, u) == 2 && pemu_isdir("/tmp/pemu-test/keep"), "path-like name rejected"); }
++        { char *u[] = { "pemu", "uninstall", "..", "-y" }; CHECK(pemu_uninstall(4, u) == 2, ".. rejected"); }
++        { char *u[] = { "pemu", "uninstall", "nope", "-y" }; CHECK(pemu_uninstall(4, u) == 1, "missing rootfs"); }
++        { char *u[] = { "pemu", "uninstall", "lnk", "-y" }; CHECK(pemu_uninstall(4, u) == 0 && pemu_isdir("/tmp/pemu-test/rfs/deb"), "symlink: only the link goes"); }
++        { char *u[] = { "pemu", "rm", "deb", "--yes" }; CHECK(pemu_uninstall(4, u) == 0 && access("/tmp/pemu-test/rfs/deb", F_OK) != 0, "rootfs removed (read-only dirs included)"); }
++        CHECK(access("/tmp/pemu-test/keep/f", F_OK) == 0, "symlink target outside the rootfs must survive");
++        CHECK(pemu_isdir("/tmp/pemu-test/rfs/other"), "other rootfs untouched");
++        unsetenv("PEMU_ROOTFS_DIR");
++    }
+     /* ---- resolv.conf usability */
+     {
+         const char *cases[][2] = { { "", "0" }, { "# Generated by NetworkManager\n", "0" }, { "nameserver 127.0.0.53\noptions edns0\n", "0" },
