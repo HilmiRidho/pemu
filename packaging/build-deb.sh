@@ -1,5 +1,6 @@
 #!/bin/sh
 # usage: packaging/build-deb.sh <debian|termux> <deb-arch> <version> <bindir> <outdir>
+#   optional: PEMU_HOMEPAGE=https://... adds a Homepage: field to the package
 #   debian: /usr/bin/pemu, /usr/bin/pemu_x64        (arch: amd64 | arm64)
 #   termux: $TERMUX_PREFIX/bin/...                  (arch: aarch64)
 set -e
@@ -27,7 +28,7 @@ size=$(du -sk "$root$prefix" | cut -f1)
   echo "Installed-Size: $size"
   echo "Depends: $deps"
   [ -z "$rec" ] || echo "Recommends: $rec"
-  echo "Homepage: https://github.com/OWNER/pemu"
+  [ -z "$PEMU_HOMEPAGE" ] || echo "Homepage: $PEMU_HOMEPAGE"
   echo "Description: user-space CPU emulator with built-in proot (chroot, bind mounts, fake root)"
   echo " pemu runs foreign-architecture Linux rootfs images without ptrace or qemu."
   echo " Guest paths are translated directly in the syscall layer."

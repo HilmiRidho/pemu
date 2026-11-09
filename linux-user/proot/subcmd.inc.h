@@ -1,5 +1,5 @@
-/* linux-user/proot/subcmd.inc.h - sub-commands: login / install / list. Fragment of pemu_root.h (not self-contained). SPDX-License-Identifier: Apache-2.0 */
-/* ---- sub-commands: login / install / list */
+/* linux-user/proot/subcmd.inc.h - sub-commands: login / install / uninstall / list. Fragment of pemu_root.h (not self-contained). SPDX-License-Identifier: Apache-2.0 */
+/* ---- sub-commands: login / install / uninstall / list */
 static const char *pemu_dirs(int i, char *buf, size_t sz) {
     const char *e = getenv("PEMU_ROOTFS_DIR"), *h = getenv("HOME"), *pf = getenv("PREFIX");
     switch (i) {
@@ -20,19 +20,44 @@ static int pemu_find_rootfs(const char *name, char *out, size_t sz) {
     }
     return pemu_isdir(name) ? (snprintf(out, sz, "%s", name), 0) : -1;
 }
-static void pemu_usage(void) {
+static void pemu_usage(FILE *f) {
     fputs("pemu - user-mode emulator with a built-in proot\n\n"
-          "  pemu login [options] NAME|DIR [command [args...]]   enter a rootfs (default: bash -l, fake root)\n"
-          "      -b, --bind SRC[:DST]   bind a host path into the guest (repeatable)\n"
-          "      -w, --cwd DIR          start directory (default /root)\n"
-          "      -e, --env VAR=val      set a guest environment variable\n"
-          "          --no-root-id       do not pretend to be root\n"
-          "          --no-default-binds do not bind /dev /proc /sys\n"
-          "  pemu install NAME TARBALL [--strip N]                unpack a rootfs tarball (tar must be installed)\n"
-          "  pemu list                                            list installed rootfs\n"
-          "  pemu [-r DIR] [-b SRC[:DST]] [-w DIR] [--root-id] [qemu-style options] program [args...]\n\n"
+          "usage:\n"
+          "  pemu login [options] NAME|DIR [command [args...]]\n"
+          "        enter a rootfs (default command: bash -l, fake root, cwd /root)\n"
+          "      -b, --bind SRC[:DST]    bind a host path into the guest (repeatable)\n"
+          "      -w, --cwd DIR           start directory (default /root)\n"
+          "      -e, --env VAR=val       set a guest environment variable (repeatable)\n"
+          "          --no-root-id        do not pretend to be root (uid/gid stay the host's)\n"
+          "          --no-default-binds  do not bind /dev /proc /sys\n"
+          "  pemu install NAME TARBALL [--strip N]\n"
+          "        unpack a rootfs tarball into $PEMU_ROOTFS_DIR or ~/.pemu/rootfs (needs tar)\n"
+          "        --strip N: leading path components to drop (default: automatic)\n"
+          "  pemu uninstall NAME [-y]          (aliases: remove, rm)\n"
+          "        delete an installed rootfs; asks for confirmation unless -y/--yes is given\n"
+          "  pemu list\n"
+          "        list installed rootfs\n"
+          "  pemu [options] program [args...]      proot-style, without `login`\n"
+          "      -r, --rootfs DIR        guest root file system\n"
+          "      -b, --bind SRC[:DST]    bind mount (also -m, --mount)\n"
+          "      -w, --cwd DIR           initial guest directory (also --pwd)\n"
+          "          --root-id           fake uid/gid 0 (proot's -0; here -0 is qemu's argv0)\n"
+          "      -i, --change-id U[:G]   fake uid/gid\n"
+          "      -k, --kernel-release R  fake `uname -r`\n"
+          "      -l, --link2symlink      emulate hard links with symlinks\n"
+          "          --kill-on-exit      kill leftover guest processes when the main one exits\n"
+          "          --no-default-binds  do not bind /dev /proc /sys\n"
+          "      -v, --verbose N         log level\n"
+          "      -0 ARGV0  -E VAR=val  -U VAR  -strace  -jit / -nojit    qemu-style options\n"
+          "      --version, -h/--help\n\n"
           "NAME is looked up in $PEMU_ROOTFS_DIR, ~/.pemu/rootfs, $PREFIX/var/lib/pemu/rootfs and\n"
-          "$PREFIX/var/lib/proot-distro/installed-rootfs.\n", stderr);
+          "$PREFIX/var/lib/proot-distro/installed-rootfs.\n\n"
+          "environment:\n"
+          "  PEMU_ROOTFS_DIR=DIR     extra rootfs directory (first choice for install)\n"
+          "  PEMU_SECURE_OPEN=0|1    race-free openat2 path off/on (default on, off on Android)\n"
+          "  PEMU_FAKE_PROC=1        always serve the fake /proc files\n"
+          "  PEMU_JIT=0              use the interpreter instead of the JIT\n"
+          "  QEMU_STRACE=1           trace guest syscalls (same as -strace)\n", f);
 }
 /* 1 when resolv.conf holds at least one nameserver that is not loopback (nothing listens on 127.x inside a guest) */
 static int pemu_resolv_usable(const char *path) {
@@ -69,10 +94,10 @@ static int pemu_login(int *pargc, char ***pargv) {
         else if ((!strcmp(o, "-e") || !strcmp(o, "--env")) && i + 1 < argc && ne < 64) env[ne++] = argv[++i];
         else if (!strcmp(o, "--no-root-id")) rootid = 0;
         else if (!strcmp(o, "--no-default-binds")) nodef = 1;
-        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(); return 0; }
+        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(stdout); return 0; }
         else { fprintf(stderr, "pemu login: unknown option %s\n", o); return 2; }
     }
-    if (i >= argc) { pemu_usage(); return 2; }
+    if (i >= argc) { pemu_usage(stderr); return 2; }
     char root[PATH_MAX];
     if (pemu_find_rootfs(argv[i], root, sizeof root) < 0) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", argv[i]); return 1; }
     i++;
@@ -153,7 +178,7 @@ static int pemu_install(int argc, char **argv) {
         if (!strcmp(argv[i], "--strip") && i + 1 < argc) strip = atoi(argv[++i]);
         else if (!name) name = argv[i]; else if (!tb) tb = argv[i];
     }
-    if (!name || !tb || strchr(name, '/')) { pemu_usage(); return 2; }
+    if (!name || !tb || strchr(name, '/')) { pemu_usage(stderr); return 2; }
     char b[PATH_MAX], dest[PATH_MAX]; const char *d = pemu_dirs(0, b, sizeof b);
     if (!d) d = pemu_dirs(1, b, sizeof b);
     if (!d) { fputs("pemu: set HOME or PEMU_ROOTFS_DIR\n", stderr); return 1; }
@@ -192,13 +217,82 @@ static int pemu_install(int argc, char **argv) {
     else fprintf(stderr, "pemu: done. enter with: pemu login %s\n", name);
     return rc ? 1 : 0;
 }
+/* ---- uninstall: delete a rootfs by name.  fd-based walk: symlinks are never followed (they are unlinked), directories that
+ * belong to another device (a real mount inside the rootfs) are left alone, and read-only directories are made writable first. */
+static int pemu_rm_children(int dfd, dev_t dev, int depth) {   /* consumes dfd */
+    int bad = 0;
+    DIR *dp = fdopendir(dfd); if (!dp) { close(dfd); return 1; }
+    int fd = dirfd(dp);
+    struct dirent *e;
+    while ((e = readdir(dp))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        struct stat st;
+        if (fstatat(fd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) { bad = 1; continue; }
+        if (S_ISDIR(st.st_mode)) {
+            if (st.st_dev != dev || depth >= 512) { fprintf(stderr, "pemu: skipping %s (%s)\n", e->d_name, st.st_dev != dev ? "other device, is something mounted there?" : "too deep"); bad = 1; continue; }
+            int sub = openat(fd, e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (sub < 0 && errno == EACCES && fchmodat(fd, e->d_name, 0700, 0) == 0) sub = openat(fd, e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (sub < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; continue; }
+            fchmod(sub, 0700);                              /* a 0555 directory from a tarball would block unlinkat */
+            if (pemu_rm_children(sub, dev, depth + 1)) bad = 1;
+            if (unlinkat(fd, e->d_name, AT_REMOVEDIR) < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; }
+        } else if (unlinkat(fd, e->d_name, 0) < 0) { fprintf(stderr, "pemu: %s: %s\n", e->d_name, strerror(errno)); bad = 1; }
+    }
+    closedir(dp);
+    return bad;
+}
+static int pemu_uninstall(int argc, char **argv) {
+    const char *name = NULL; int yes = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "-y") || !strcmp(argv[i], "--yes")) yes = 1;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { pemu_usage(stdout); return 0; }
+        else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "pemu uninstall: unknown option %s\n", argv[i]); return 2; }
+        else if (!name) name = argv[i];
+        else { pemu_usage(stderr); return 2; }
+    }
+    if (!name) { pemu_usage(stderr); return 2; }
+    if (!*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
+        fputs("pemu uninstall: NAME must be a plain rootfs name, not a path (see: pemu list)\n", stderr); return 2;
+    }
+    char b[PATH_MAX], target[PATH_MAX]; struct stat st; int found = 0;
+    for (int i = 0; i < 4 && !found; i++) {
+        const char *d = pemu_dirs(i, b, sizeof b); if (!d) continue;
+        char rd[PATH_MAX]; if (!realpath(d, rd) || !strcmp(rd, "/")) continue;     /* never operate directly under / */
+        size_t rl = strlen(rd), nl = strlen(name);
+        if (rl + 1 + nl >= sizeof target) continue;
+        memcpy(target, rd, rl); target[rl] = '/'; memcpy(target + rl + 1, name, nl + 1);
+        if (lstat(target, &st) == 0) found = 1;
+    }
+    if (!found) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", name); return 1; }
+    if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) { fprintf(stderr, "pemu: %s is not a directory\n", target); return 1; }
+    if (!yes) {
+        if (!isatty(0)) { fputs("pemu: refusing to delete without confirmation (stdin is not a terminal); use -y\n", stderr); return 1; }
+        fprintf(stderr, "Delete rootfs '%s' (%s%s) and everything in it? [y/N] ", name, target, S_ISLNK(st.st_mode) ? ", symlink: only the link is removed" : "");
+        char ans[16] = ""; if (!fgets(ans, sizeof ans, stdin) || (ans[0] != 'y' && ans[0] != 'Y')) { fputs("pemu: cancelled\n", stderr); return 1; }
+    }
+    if (S_ISLNK(st.st_mode)) {
+        if (unlink(target) < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); return 1; }
+        fprintf(stderr, "pemu: removed link %s (its target was left in place)\n", target); return 0;
+    }
+    int fd = open(target, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == EACCES && chmod(target, 0700) == 0) fd = open(target, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); return 1; }
+    struct stat ds; if (fstat(fd, &ds) < 0) { close(fd); return 1; }
+    fchmod(fd, 0700);
+    int bad = pemu_rm_children(fd, ds.st_dev, 0);
+    if (rmdir(target) < 0) { fprintf(stderr, "pemu: %s: %s\n", target, strerror(errno)); bad = 1; }
+    if (bad) fprintf(stderr, "pemu: %s was not removed completely\n", target);
+    else fprintf(stderr, "pemu: removed %s\n", target);
+    return bad ? 1 : 0;
+}
 /* entry for main(): handles the sub-commands. -1 = go on with the new argc/argv */
 static int pemu_subcmd(int *pargc, char ***pargv) {
     if (*pargc < 2) return -1;
     const char *c = (*pargv)[1];
     if (!strcmp(c, "login"))   return pemu_login(pargc, pargv);
     if (!strcmp(c, "install")) return pemu_install(*pargc, *pargv);
+    if (!strcmp(c, "uninstall") || !strcmp(c, "remove") || !strcmp(c, "rm")) return pemu_uninstall(*pargc, *pargv);
     if (!strcmp(c, "list"))    return pemu_list();
-    if (!strcmp(c, "--help") || !strcmp(c, "-h")) { pemu_usage(); return 0; }
+    if (!strcmp(c, "--help") || !strcmp(c, "-h")) { pemu_usage(stdout); return 0; }
     return -1;
 }

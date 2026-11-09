@@ -1,7 +1,7 @@
 /* linux-user/aarch64/main.inc.h - command line, process setup, main. SPDX-License-Identifier: Apache-2.0 */
 int main(int argc, char**argv, char**envp) {
     const char*argv0 = NULL; int a = 1, pr, nojit = getenv("PEMU_JIT") && !strcmp(getenv("PEMU_JIT"), "0");
-    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / list */
+    { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / uninstall / list */
     for (; a < argc && argv[a][0] == '-' && argv[a][1]; a++) {
         const char*o = argv[a];
         if (!strcmp(o, "--")) { a++; break; }
