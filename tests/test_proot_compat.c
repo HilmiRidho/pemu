@@ -1,5 +1,5 @@
 /* Behaviour that pemu's built-in proot takes from proot 5.5.0: bindings, placeholders, fake ids, cwd, exit, and the optional
- * features (-i -k -v -m --pwd --kill-on-exit, -l link2symlink).  The options are pemu's own, only what they do follows proot.
+ * features (-i -k -v -b -w --kill-on-exit, -l link2symlink).  The options are pemu's own, only what they do follows proot.
  * The resolver state is global, so every scenario runs in its own forked child. */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -227,11 +227,11 @@ static void t_kernel(void) {
 }
 
 static void t_opts(void) {                           /* the optional proot options, spelled as pemu's option parser takes them */
-    char *a[] = { "pemu", NDB, "-r", T "/rf", "-i", "7:8", "-v", "-1", "-m", T "/host2:/mnt/two", "--pwd", "/root", "--kill-on-exit" };
+    char *a[] = { "pemu", NDB, "-r", T "/rf", "-i", "7:8", "-v", "-1", "-b", T "/host2:/mnt/two", "-w", "/root", "--kill-on-exit" };
     CHECK(setup(a, 13) == 0, "finish");
     CHECK(pemu_fakeroot && pemu_uid[PEMU_R] == 7 && pemu_gid[PEMU_R] == 8 && !PEMU_PRIV(), "-i 7:8: %u:%u", pemu_uid[0], pemu_gid[0]);
     CHECK(pemu_verbose == -1 && pemu_killall, "-v -1, --kill-on-exit");
-    CHECK(!strcmp(pemu_cwd, "/root"), "--pwd: %s", pemu_cwd);
+    CHECK(!strcmp(pemu_cwd, "/root"), "-w: %s", pemu_cwd);
     char h[PEMU_HP]; CHECK(pemu_path(AT_FDCWD, "/mnt/two/f2", 1, h, sizeof h, NULL) == 0 && !strcmp(h, T "/host2/f2"), "-m is -b: %s", h);
     char *b[] = { "pemu", NDB, "-r", T "/rf", "--change-id=3:4", "--verbose=2", "--bind=" T "/host2:/m2", "--cwd=/root", "--kernel-release=4.19" };
     pemu_fakeroot = 0; pemu_npb = 0; pemu_nb = 0;

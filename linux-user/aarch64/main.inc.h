@@ -1,28 +1,23 @@
 /* linux-user/aarch64/main.inc.h - command line, process setup, main. SPDX-License-Identifier: Apache-2.0 */
-int main(int argc, char**argv, char**envp) {
+int main(int argc, char**argv) {
     const char*argv0 = NULL; int a = 1, pr, nojit = getenv("PEMU_JIT") && !strcmp(getenv("PEMU_JIT"), "0");
     { int rc = pemu_subcmd(&argc, &argv); if (rc >= 0) return rc; }       /* login / install / uninstall / list */
     for (; a < argc && argv[a][0] == '-' && argv[a][1]; a++) {
         const char*o = argv[a];
         if (!strcmp(o, "--")) { a++; break; }
         if (!strcmp(o, "-0") && a + 1 < argc) argv0 = argv[++a];
-        else if ((!strcmp(o, "-L") || !strcmp(o, "-cpu") || !strcmp(o, "-s") || !strcmp(o, "-g") || !strcmp(o, "-R")) && a + 1 < argc) a++;
-        else if (!strcmp(o, "-E") && a + 1 < argc) { char*v = strdup(argv[++a]); char*eq = strchr(v, '='); if (eq) { *eq = 0; setenv(v, eq + 1, 1); } }
-        else if (!strcmp(o, "-U") && a + 1 < argc) unsetenv(argv[++a]);
         else if (!strcmp(o, "-strace")) g_trace = 1;
         else if (!strcmp(o, "-nojit")) nojit = 1;
-        else if (!strcmp(o, "-jit")) nojit = 0;
-        else if (!strcmp(o, "--version") || !strcmp(o, "-version")) { printf("pemu %s (aarch64 user-mode emulator with x86_64 JIT and built-in proot, qemu-user alternative)\n", PEMU_RELEASE); return 0; }
+        else if (!strcmp(o, "--version")) { printf("pemu %s (aarch64 user-mode emulator with x86_64 JIT and built-in proot)\n", PEMU_RELEASE); return 0; }
         else if ((pr = pemu_opt(argc, argv, &a)) != 0) { if (pr < 0) return 2; }
         else { fprintf(stderr, "pemu: unknown option %s\n", o); return 2; }
     }
-    if (a >= argc) { fprintf(stderr, "usage: pemu [-0 argv0] [-strace] program [args...]\n       pemu login NAME|DIR [cmd...]   (pemu --help)\n"); return 2; }
+    if (a >= argc) { fprintf(stderr, "usage: pemu login NAME|DIR [options] [command [args...]]\n       pemu [-strace] [-nojit] program [args...]\n       (pemu --help)\n"); return 2; }
     if (pemu_finish() < 0) return 1;
-    if (getenv("QEMU_STRACE")) g_trace = 1;
+    if (getenv("PEMU_STRACE")) g_trace = 1;
     ssize_t sl = readlink("/proc/self/exe", g_self, sizeof g_self - 1);
     if (sl > 0) g_self[sl] = 0; else strcpy(g_self, argv[0]);
-    (void) envp;
-    const char*prog = argv[a]; char**pav = argv + a; int pac = argc - a, *dummy = NULL; (void) dummy;
+    const char*prog = argv[a]; char**pav = argv + a; int pac = argc - a;
     char hostprog[PEMU_HP], gprog[PATH_MAX]; const char*loadp = prog;
     if (pemu_on) {
         char**nv; long e = pemu_exec_resolve(prog, pav, &nv, hostprog, gprog);
@@ -30,9 +25,8 @@ int main(int argc, char**argv, char**envp) {
         pav = nv; pac = 0; while (pav[pac]) pac++;
         loadp = hostprog; prog = gprog; snprintf(pemu_exe, sizeof pemu_exe, "%s", gprog);
     }
-    /* guest environment = host environment with QEMU_SET_ENV / QEMU_UNSET_ENV applied */
-    char*sete = getenv("QEMU_SET_ENV"); if (sete) { sete = strdup(sete); char*sp1; for (char*t = strtok_r(sete, ",", &sp1); t; t = strtok_r(NULL, ",", &sp1)) { char*eq = strchr(t, '='); if (eq) { *eq = 0; setenv(t, eq + 1, 1); } } }
-    char*unse = getenv("QEMU_UNSET_ENV"); if (unse) { unse = strdup(unse); char*sp2; for (char*t = strtok_r(unse, ",", &sp2); t; t = strtok_r(NULL, ",", &sp2)) unsetenv(t); }
+    /* guest environment = host environment plus PEMU_SET_ENV (VAR=val,...) */
+    char*sete = getenv("PEMU_SET_ENV"); if (sete) { sete = strdup(sete); char*sp1; for (char*t = strtok_r(sete, ",", &sp1); t; t = strtok_r(NULL, ",", &sp1)) { char*eq = strchr(t, '='); if (eq) { *eq = 0; setenv(t, eq + 1, 1); } } }
     init_tbl();
     ElfInfo prg = {0}, itp = {0};
     if (load_elf(loadp, 0, &prg) < 0) return 127;

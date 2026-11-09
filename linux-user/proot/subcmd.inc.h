@@ -23,33 +23,32 @@ static int pemu_find_rootfs(const char *name, char *out, size_t sz) {
 static void pemu_usage(FILE *f) {
     fputs("pemu - user-mode emulator with a built-in proot\n\n"
           "usage:\n"
-          "  pemu login [options] NAME|DIR [command [args...]]\n"
+          "  pemu login NAME|DIR [options] [command [args...]]\n"
           "        enter a rootfs (default command: bash -l, fake root, cwd /root)\n"
           "      -b, --bind SRC[:DST]    bind a host path into the guest (repeatable)\n"
           "      -w, --cwd DIR           start directory (default /root)\n"
           "      -e, --env VAR=val       set a guest environment variable (repeatable)\n"
-          "          --no-root-id        do not pretend to be root (uid/gid stay the host's)\n"
-          "          --no-default-binds  do not bind /dev /proc /sys\n"
-          "  pemu install NAME TARBALL [--strip N]\n"
-          "        unpack a rootfs tarball into $PEMU_ROOTFS_DIR or ~/.pemu/rootfs (needs tar)\n"
-          "        --strip N: leading path components to drop (default: automatic)\n"
-          "  pemu uninstall NAME [-y]          (aliases: remove, rm)\n"
-          "        delete an installed rootfs; asks for confirmation unless -y/--yes is given\n"
-          "  pemu list\n"
-          "        list installed rootfs\n"
-          "  pemu [options] program [args...]      proot-style, without `login`\n"
-          "      -r, --rootfs DIR        guest root file system\n"
-          "      -b, --bind SRC[:DST]    bind mount (also -m, --mount)\n"
-          "      -w, --cwd DIR           initial guest directory (also --pwd)\n"
-          "          --root-id           fake uid/gid 0 (proot's -0; here -0 is qemu's argv0)\n"
-          "      -i, --change-id U[:G]   fake uid/gid\n"
+          "      -i, --change-id U[:G]   fake uid/gid (instead of root)\n"
           "      -k, --kernel-release R  fake `uname -r`\n"
           "      -l, --link2symlink      emulate hard links with symlinks\n"
           "          --kill-on-exit      kill leftover guest processes when the main one exits\n"
+          "          --no-root-id        do not pretend to be root (uid/gid stay the host's)\n"
           "          --no-default-binds  do not bind /dev /proc /sys\n"
           "      -v, --verbose N         log level\n"
-          "      -0 ARGV0  -E VAR=val  -U VAR  -strace  -jit / -nojit    qemu-style options\n"
-          "      --version, -h/--help\n\n"
+          "      -strace  -nojit         trace guest syscalls / use the interpreter\n"
+          "      -h, --help\n"
+          "        options go after NAME; the first non-option argument starts the command\n"
+          "        (use `--` before a command that begins with `-`). Value options also take --name=value.\n"
+          "  pemu install NAME TARBALL [--strip N]\n"
+          "        unpack a rootfs tarball into $PEMU_ROOTFS_DIR or ~/.pemu/rootfs (needs tar)\n"
+          "        --strip N: leading path components to drop (default: automatic)\n"
+          "  pemu uninstall NAME [-y]\n"
+          "        delete an installed rootfs; asks for confirmation unless -y/--yes is given\n"
+          "  pemu list\n"
+          "        list installed rootfs\n"
+          "  pemu [-strace] [-nojit] program [args...]\n"
+          "        run a single program, no rootfs\n"
+          "  pemu --version, -h/--help\n\n"
           "NAME is looked up in $PEMU_ROOTFS_DIR, ~/.pemu/rootfs, $PREFIX/var/lib/pemu/rootfs and\n"
           "$PREFIX/var/lib/proot-distro/installed-rootfs.\n\n"
           "environment:\n"
@@ -57,7 +56,8 @@ static void pemu_usage(FILE *f) {
           "  PEMU_SECURE_OPEN=0|1    race-free openat2 path off/on (default on, off on Android)\n"
           "  PEMU_FAKE_PROC=1        always serve the fake /proc files\n"
           "  PEMU_JIT=0              use the interpreter instead of the JIT\n"
-          "  QEMU_STRACE=1           trace guest syscalls (same as -strace)\n", f);
+          "  PEMU_STRACE=1           trace guest syscalls (same as -strace)\n"
+          "  PEMU_SET_ENV=A=1,B=2    extra guest environment variables\n", f);
 }
 /* 1 when resolv.conf holds at least one nameserver that is not loopback (nothing listens on 127.x inside a guest) */
 static int pemu_resolv_usable(const char *path) {
@@ -82,25 +82,45 @@ static void pemu_write_if_missing(const char *root, const char *rel, const char 
     }
     FILE *f = fopen(p, "w"); if (f) { fputs(text, f); fclose(f); }
 }
-/* "pemu login ..." -> rewrite argv into the plain form; returns -1 = continue with the new argc/argv, else the exit code */
+/* "pemu login NAME [options] [command...]" -> rewrite argv into the internal form (also what a re-exec'd pemu receives);
+ * returns -1 = continue with the new argc/argv, else the exit code */
 static int pemu_login(int *pargc, char ***pargv) {
     int argc = *pargc; char **argv = *pargv;
-    int i = 2, rootid = 1, nodef = 0; const char *env[64]; int ne = 0, nb = 0; const char *bind[PEMU_MAXB]; const char *cwd = NULL;
+    if (argc < 3) { pemu_usage(stderr); return 2; }
+    if (!strcmp(argv[2], "-h") || !strcmp(argv[2], "--help")) { pemu_usage(stdout); return 0; }
+    if (argv[2][0] == '-' && argv[2][1] && strcmp(argv[2], "--")) {
+        fprintf(stderr, "pemu login: NAME must come first: pemu login NAME [options] [command...]\n"); return 2;
+    }
+    const char *name = argv[2];
+    int i = 3, rootid = 1, chid = 0, idroot = 1, nodef = 0, ne = 0, nb = 0, nx = 0; const char *env[64], *bind[PEMU_MAXB], *cwd = NULL;
+    const char *xo[96];                                   /* options handed to the internal parser as they are */
     for (; i < argc && argv[i][0] == '-' && argv[i][1]; i++) {
-        const char *o = argv[i];
+        const char *o = argv[i], *v = NULL; int m, i0 = i;
         if (!strcmp(o, "--")) { i++; break; }
-        if ((!strcmp(o, "-b") || !strcmp(o, "--bind")) && i + 1 < argc && nb < PEMU_MAXB) bind[nb++] = argv[++i];
-        else if ((!strcmp(o, "-w") || !strcmp(o, "--cwd")) && i + 1 < argc) cwd = argv[++i];
-        else if ((!strcmp(o, "-e") || !strcmp(o, "--env")) && i + 1 < argc && ne < 64) env[ne++] = argv[++i];
+        if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(stdout); return 0; }
+#define LOPT(s, l) ((m = pemu_opt_value(o, s, l, argc, argv, &i, &v)) != 0)
+#define NEEDV() do { if (m < 0) { fprintf(stderr, "pemu login: option %s needs a value\n", o); return 2; } } while (0)
+        if (LOPT("-b", "--bind")) { NEEDV(); if (nb >= PEMU_MAXB) { fputs("pemu login: too many binds\n", stderr); return 2; } bind[nb++] = v; }
+        else if (LOPT("-w", "--cwd")) { NEEDV(); cwd = v; }
+        else if (LOPT("-e", "--env")) { NEEDV(); if (ne >= 64) { fputs("pemu login: too many -e options\n", stderr); return 2; } env[ne++] = v; }
+        else if (LOPT("-i", "--change-id") || LOPT("-k", "--kernel-release") || LOPT("-v", "--verbose")
+                 ){
+            NEEDV();
+            if (nx + 2 > 96) { fputs("pemu login: too many options\n", stderr); return 2; }
+            if (i != i0) { xo[nx++] = argv[i0]; xo[nx++] = argv[i]; } else xo[nx++] = o;   /* "-x value" or "--name=value" */
+            if (!strcmp(o, "-i") || !strncmp(o, "--change-id", 11)) { chid = 1; if (strtol(v, NULL, 10) != 0) idroot = 0; }
+        }
         else if (!strcmp(o, "--no-root-id")) rootid = 0;
         else if (!strcmp(o, "--no-default-binds")) nodef = 1;
-        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { pemu_usage(stdout); return 0; }
+        else if (!strcmp(o, "-l") || !strcmp(o, "--link2symlink") || !strcmp(o, "--kill-on-exit")
+                 || !strcmp(o, "-strace") || !strcmp(o, "-nojit")) { if (nx + 1 > 96) return 2; xo[nx++] = o; }
         else { fprintf(stderr, "pemu login: unknown option %s\n", o); return 2; }
+#undef LOPT
+#undef NEEDV
     }
-    if (i >= argc) { pemu_usage(stderr); return 2; }
+    if (chid) rootid = idroot;                            /* -i replaces the default fake root (keeps HOME/USER consistent) */
     char root[PATH_MAX];
-    if (pemu_find_rootfs(argv[i], root, sizeof root) < 0) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", argv[i]); return 1; }
-    i++;
+    if (pemu_find_rootfs(name, root, sizeof root) < 0) { fprintf(stderr, "pemu: rootfs '%s' not found (see: pemu list)\n", name); return 1; }
     char rr[PATH_MAX]; if (!realpath(root, rr)) { fprintf(stderr, "pemu: %s: %s\n", root, strerror(errno)); return 1; }
     /* rootfs preparation: resolver, hosts, apt without the _apt sandbox user (setuid is faked) */
     {
@@ -118,13 +138,17 @@ static int pemu_login(int *pargc, char ***pargv) {
     const char *term = getenv("TERM"), *ct = getenv("COLORTERM"), *lang = getenv("LANG");
     char termv[128], ctv[64], langv[64];
     snprintf(termv, sizeof termv, "%s", term && *term ? term : "xterm-256color"); snprintf(ctv, sizeof ctv, "%s", ct ? ct : ""); snprintf(langv, sizeof langv, "%s", lang && *lang ? lang : "C.UTF-8");
-    char qs[1024] = ""; { const char *v = getenv("QEMU_SET_ENV"); if (v) snprintf(qs, sizeof qs, "%s", v); }
+    char ps[1024] = ""; { const char *v = getenv("PEMU_SET_ENV"); if (v) snprintf(ps, sizeof ps, "%s", v); }
+    static const char *keep[] = { "PEMU_SECURE_OPEN", "PEMU_FAKE_PROC", "PEMU_JIT", "PEMU_STRACE" };   /* pemu's own settings survive clearenv */
+    char kv[sizeof keep / sizeof *keep][256]; int kh[sizeof keep / sizeof *keep];
+    for (unsigned q = 0; q < sizeof keep / sizeof *keep; q++) { const char *v = getenv(keep[q]); kh[q] = v != NULL; if (v) snprintf(kv[q], sizeof kv[q], "%s", v); }
     clearenv();
+    for (unsigned q = 0; q < sizeof keep / sizeof *keep; q++) if (kh[q]) setenv(keep[q], kv[q], 1);
     setenv("HOME", rootid ? "/root" : "/tmp", 1); setenv("USER", rootid ? "root" : "user", 1); setenv("LOGNAME", rootid ? "root" : "user", 1);
     setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games", 1);
     setenv("TERM", termv, 1); setenv("LANG", langv, 1); setenv("TMPDIR", "/tmp", 1);
     if (*ctv) setenv("COLORTERM", ctv, 1);
-    if (*qs) setenv("QEMU_SET_ENV", qs, 1);
+    if (*ps) setenv("PEMU_SET_ENV", ps, 1);
     for (int k = 0; k < ne; k++) { char *v = strdup(env[k]), *eq = strchr(v, '='); if (eq) { *eq = 0; setenv(v, eq + 1, 1); } }
     /* command */
     int cc = argc - i; const char *shell = NULL; char hp[PEMU_HP];
@@ -133,13 +157,14 @@ static int pemu_login(int *pargc, char ***pargv) {
         for (int k = 0; k < 3; k++) { snprintf(hp, sizeof hp, "%s%s", rr, sh[k]); if (access(hp, F_OK) == 0 || k == 2) { shell = sh[k]; break; } }
         setenv("SHELL", shell, 1);
     }
-    char **nv = calloc((size_t) (argc + 4 * nb + 16), sizeof *nv); int k = 0;
+    char **nv = calloc((size_t) (argc + 4 * nb + nx + 16), sizeof *nv); int k = 0;
     nv[k++] = argv[0]; nv[k++] = "-r"; nv[k++] = strdup(rr);
     for (int j = 0; j < nb; j++) { nv[k++] = "-b"; nv[k++] = (char*) bind[j]; }
     char rd[PEMU_HP]; snprintf(rd, sizeof rd, "%s/root", rr);
     nv[k++] = "-w"; nv[k++] = (char*) (cwd ? cwd : (rootid && pemu_isdir(rd) ? "/root" : "/"));
     if (rootid) nv[k++] = "--root-id";
     if (nodef) nv[k++] = "--no-default-binds";
+    for (int j = 0; j < nx; j++) nv[k++] = (char*) xo[j];
     nv[k++] = "--";
     if (cc <= 0) { nv[k++] = (char*) shell; nv[k++] = "-l"; } else for (int j = i; j < argc; j++) nv[k++] = argv[j];
     nv[k] = NULL; *pargv = nv; *pargc = k;
@@ -291,7 +316,7 @@ static int pemu_subcmd(int *pargc, char ***pargv) {
     const char *c = (*pargv)[1];
     if (!strcmp(c, "login"))   return pemu_login(pargc, pargv);
     if (!strcmp(c, "install")) return pemu_install(*pargc, *pargv);
-    if (!strcmp(c, "uninstall") || !strcmp(c, "remove") || !strcmp(c, "rm")) return pemu_uninstall(*pargc, *pargv);
+    if (!strcmp(c, "uninstall")) return pemu_uninstall(*pargc, *pargv);
     if (!strcmp(c, "list"))    return pemu_list();
     if (!strcmp(c, "--help") || !strcmp(c, "-h")) { pemu_usage(stdout); return 0; }
     return -1;

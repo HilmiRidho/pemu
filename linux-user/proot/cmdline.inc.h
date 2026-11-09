@@ -1,5 +1,5 @@
 /* linux-user/proot/cmdline.inc.h - command-line options. Fragment of pemu_root.h (not self-contained). SPDX-License-Identifier: Apache-2.0 */
-/* ---- command line: pemu's rootfs options (-r -b -w, and the optional proot ones: -m --pwd -i -k -v -l --kill-on-exit) */
+/* ---- command line: pemu's rootfs options (-r -b -w, and the optional proot ones: -i -k -v -l --kill-on-exit) */
 static int pemu_add_pb(const char *h, const char *g, int must) {
     if (pemu_npb >= (int) (sizeof pemu_pb / sizeof *pemu_pb)) return -1;
     pemu_pb[pemu_npb].h = h; pemu_pb[pemu_npb].g = g; pemu_pb[pemu_npb].must = must; pemu_npb++;
@@ -38,15 +38,13 @@ static int pemu_opt_value(const char *o, const char *shortn, const char *longn, 
     return 0;
 }
 /* one command-line option; 1 = consumed (*a advanced), 0 = not a rootfs option, -1 = error.
- * Value options accept "--name value" and "--name=value".  (proot's -0, -R, -S are not options here: -0 is qemu's argv0 and -R its reserved-va; use --root-id.) */
+ * Value options accept "--name value" and "--name=value". */
 static int pemu_opt(int argc, char **argv, int *a) {
     const char *o = argv[*a], *v = NULL; int m;
 #define VOPT(s, l, call) if ((m = pemu_opt_value(o, s, l, argc, argv, a, &v)) != 0) return m < 0 ? -1 : ((call) < 0 ? -1 : 1)
     VOPT("-r", "--rootfs", pemu_opt_root(v));
     VOPT("-b", "--bind", pemu_opt_bind(v));
-    VOPT("-m", "--mount", pemu_opt_bind(v));
     VOPT("-w", "--cwd", (snprintf(pemu_wd, sizeof pemu_wd, "%s", v), pemu_wd_set = 1, 0));
-    VOPT(NULL, "--pwd", (snprintf(pemu_wd, sizeof pemu_wd, "%s", v), pemu_wd_set = 1, 0));
     VOPT("-i", "--change-id", pemu_opt_id(v));
     VOPT("-k", "--kernel-release", pemu_opt_kernel(v, 0));
     VOPT("-v", "--verbose", pemu_opt_verbose(v));

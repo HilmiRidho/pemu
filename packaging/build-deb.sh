@@ -30,7 +30,7 @@ size=$(du -sk "$root$prefix" | cut -f1)
   [ -z "$rec" ] || echo "Recommends: $rec"
   [ -z "$PEMU_HOMEPAGE" ] || echo "Homepage: $PEMU_HOMEPAGE"
   echo "Description: user-space CPU emulator with built-in proot (chroot, bind mounts, fake root)"
-  echo " pemu runs foreign-architecture Linux rootfs images without ptrace or qemu."
+  echo " pemu runs foreign-architecture Linux rootfs images without ptrace."
   echo " Guest paths are translated directly in the syscall layer."
 } > "$root/DEBIAN/control"
 mkdir -p "$outdir"

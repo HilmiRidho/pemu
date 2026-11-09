@@ -11,19 +11,15 @@ int main(int argc, char**argv) {
         const char*o = argv[a];
         if (!strcmp(o, "--")) { a++; break; }
         if (!strcmp(o, "-0") && a + 1 < argc) argv0 = argv[++a];
-        else if ((!strcmp(o, "-L") || !strcmp(o, "-cpu") || !strcmp(o, "-s") || !strcmp(o, "-g") || !strcmp(o, "-R")) && a + 1 < argc) a++;
-        else if (!strcmp(o, "-E") && a + 1 < argc) { char*v = strdup(argv[++a]); char*eq = strchr(v, '='); if (eq) { *eq = 0; setenv(v, eq + 1, 1); } }
-        else if (!strcmp(o, "-U") && a + 1 < argc) unsetenv(argv[++a]);
         else if (!strcmp(o, "-strace")) g_trace = 1;
         else if (!strcmp(o, "-nojit")) nojit = 1;
-        else if (!strcmp(o, "-jit")) nojit = 0;
-        else if (!strcmp(o, "--version") || !strcmp(o, "-version")) { printf("pemu %s (x86_64 user-mode emulator with AArch64 JIT and built-in proot, qemu-user alternative)\n", PEMU_RELEASE); return 0; }
+        else if (!strcmp(o, "--version")) { printf("pemu %s (x86_64 user-mode emulator with AArch64 JIT and built-in proot)\n", PEMU_RELEASE); return 0; }
         else if ((pr = pemu_opt(argc, argv, &a)) != 0) { if (pr < 0) return 2; }
         else { fprintf(stderr, "pemu: unknown option %s\n", o); return 2; }
     }
-    if (a >= argc) { fprintf(stderr, "usage: pemu [-0 argv0] [-strace] [-nojit] program [args...]\n       pemu login NAME|DIR [cmd...]   (pemu --help)\n"); return 2; }
+    if (a >= argc) { fprintf(stderr, "usage: pemu login NAME|DIR [options] [command [args...]]\n       pemu [-strace] [-nojit] program [args...]\n       (pemu --help)\n"); return 2; }
     if (pemu_finish() < 0) return 1;
-    if (getenv("QEMU_STRACE")) g_trace = 1;
+    if (getenv("PEMU_STRACE")) g_trace = 1;
     ssize_t sl = readlink("/proc/self/exe", g_self, sizeof g_self - 1);
     if (sl > 0) g_self[sl] = 0; else strcpy(g_self, argv[0]);
     const char*prog = argv[a]; char**pav = argv + a; int pac = argc - a;
@@ -34,8 +30,7 @@ int main(int argc, char**argv) {
         pav = nv; pac = 0; while (pav[pac]) pac++;
         loadp = hostprog; prog = gprog; snprintf(pemu_exe, sizeof pemu_exe, "%s", gprog);
     }
-    char*sete = getenv("QEMU_SET_ENV"); if (sete) { sete = strdup(sete); char*sp1; for (char*t = strtok_r(sete, ",", &sp1); t; t = strtok_r(NULL, ",", &sp1)) { char*eq = strchr(t, '='); if (eq) { *eq = 0; setenv(t, eq + 1, 1); } } }
-    char*unse = getenv("QEMU_UNSET_ENV"); if (unse) { unse = strdup(unse); char*sp2; for (char*t = strtok_r(unse, ",", &sp2); t; t = strtok_r(NULL, ",", &sp2)) unsetenv(t); }
+    char*sete = getenv("PEMU_SET_ENV"); if (sete) { sete = strdup(sete); char*sp1; for (char*t = strtok_r(sete, ",", &sp1); t; t = strtok_r(NULL, ",", &sp1)) { char*eq = strchr(t, '='); if (eq) { *eq = 0; setenv(t, eq + 1, 1); } } }
     ElfInfo prg = {0}, itp = {0};
     if (load_elf(loadp, &prg) < 0) return 127;
     u64 entry = prg.entry;

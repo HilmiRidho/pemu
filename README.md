@@ -1,7 +1,7 @@
 # pemu
 
 User-mode emulator for Linux binaries with a built-in proot (chroot, bind mounts, fake root).
-No `ptrace`, no tracer process, no external `qemu`: guest paths are translated directly in the syscall layer.
+No `ptrace`, no tracer process: guest paths are translated directly in the syscall layer.
 
 | binary | guest | host |
 |---|---|---|
@@ -37,11 +37,11 @@ Removing the package does **not** delete installed rootfs. Delete those first wi
 
     pemu login debian                       # enter a rootfs (bash -l, fake root, cwd /root)
     pemu login debian apt update            # run one command
-    pemu login -b $HOME:/mnt/home -w /mnt/home debian
+    pemu login debian -b $HOME:/mnt/home -w /mnt/home
+    pemu login debian -b /sdcard -i 1000:1000 ls /sdcard   # options after NAME, then the command
     pemu install debian rootfs.tar.xz       # unpack a tarball (strips one top-level dir automatically)
     pemu list                               # installed rootfs
     pemu uninstall debian                   # delete a rootfs (asks first; -y to skip the question)
-    pemu -r /path/rootfs -b /sdcard --root-id /bin/ls       # proot style, without `login`
 
 `NAME` is looked up in `$PEMU_ROOTFS_DIR`, `~/.pemu/rootfs`, `$PREFIX/var/lib/pemu/rootfs` and
 `$PREFIX/var/lib/proot-distro/installed-rootfs` (proot-distro rootfs directories work as they are).
@@ -51,13 +51,30 @@ Removing the package does **not** delete installed rootfs. Delete those first wi
 
 | command | meaning |
 |---|---|
-| `login [options] NAME\|DIR [cmd [args...]]` | enter a rootfs; default command is `bash -l` |
+| `login NAME\|DIR [options] [cmd [args...]]` | enter a rootfs; default command is `bash -l` |
 | `install NAME TARBALL [--strip N]` | unpack a rootfs tarball; `--strip N` overrides the automatic choice |
-| `uninstall NAME [-y]` (aliases `remove`, `rm`) | delete the rootfs `NAME` |
+| `uninstall NAME [-y]` | delete the rootfs `NAME` |
 | `list` | list rootfs found in the lookup directories |
 
-`login` options: `-b/--bind SRC[:DST]` (repeatable), `-w/--cwd DIR`, `-e/--env VAR=val` (repeatable),
-`--no-root-id` (do not fake uid/gid 0), `--no-default-binds` (do not bind `/dev /proc /sys`).
+`login` options go **after** `NAME`; the first non-option argument starts the command (`--` ends the options):
+
+| option | meaning |
+|---|---|
+| `-b, --bind SRC[:DST]` | bind mount (repeatable) |
+| `-w, --cwd DIR` | initial guest directory (default `/root`) |
+| `-e, --env VAR=val` | guest environment variable (repeatable) |
+| `-i, --change-id UID[:GID]` | fake uid/gid instead of root |
+| `--no-root-id` | do not fake uid/gid 0 (host ids stay) |
+| `-k, --kernel-release R` | fake `uname -r` |
+| `-l, --link2symlink` | emulate hard links with symlinks |
+| `--kill-on-exit` | kill leftover guest processes when the main one exits |
+| `--no-default-binds` | do not bind `/dev /proc /sys` |
+| `-v, --verbose N` | log level |
+| `-strace`, `-nojit` | trace guest syscalls / use the interpreter |
+| `-h, --help` | |
+
+Value options also accept `--name=value`. `pemu login -b x NAME` (options before `NAME`) is an error.
+Without `login`, `pemu [-strace] [-nojit] program [args...]` only runs one program, without a rootfs.
 
 `login` also fills in `/etc/resolv.conf` (when it is empty, a symlink, or has no non-loopback nameserver) and
 `/etc/hosts` (when empty), and writes `APT::Sandbox::User "root"` so apt does not try to switch to `_apt`.
@@ -65,25 +82,6 @@ Removing the package does **not** delete installed rootfs. Delete those first wi
 `uninstall` takes a plain name (no `/`, `.` or `..`), never follows symlinks (a symlinked rootfs only loses the link),
 makes read-only directories writable before deleting, and leaves directories on another device (a real mount) alone.
 Without `-y` it asks on the terminal and refuses when stdin is not a terminal.
-
-### Options (proot style, `pemu [options] program [args...]`)
-
-| option | meaning |
-|---|---|
-| `-r, --rootfs DIR` | guest root file system |
-| `-b, --bind SRC[:DST]`, `-m, --mount` | bind mount (repeatable) |
-| `-w, --cwd DIR`, `--pwd` | initial guest directory |
-| `--root-id` | fake uid/gid 0 (this is proot's `-0`; here `-0` is qemu's argv0) |
-| `-i, --change-id UID[:GID]` | fake uid/gid |
-| `-k, --kernel-release R` | fake `uname -r` |
-| `-l, --link2symlink` | emulate hard links with symlinks |
-| `--kill-on-exit` | kill leftover guest processes when the main one exits |
-| `--no-default-binds` | do not bind `/dev /proc /sys` |
-| `-v, --verbose N` | log level |
-| `-0 ARGV0`, `-E VAR=val`, `-U VAR`, `-strace`, `-jit` / `-nojit` | qemu-style options |
-| `--version`, `-h/--help` | |
-
-Value options also accept `--name=value`. `-L -cpu -s -g -R` are accepted and ignored (qemu compatibility).
 
 ### Environment
 
@@ -93,8 +91,8 @@ Value options also accept `--name=value`. `-L -cpu -s -g -R` are accepted and ig
 | `PEMU_SECURE_OPEN=0/1` | race-free `openat2` open path off/on (default: on, off on Android) |
 | `PEMU_FAKE_PROC=1` | always serve the fake `/proc` files, even if the real ones can be read |
 | `PEMU_JIT=0` | run the interpreter instead of the JIT |
-| `QEMU_STRACE=1` | trace guest syscalls (same as `-strace`) |
-| `QEMU_SET_ENV`, `QEMU_UNSET_ENV` | comma separated `VAR=val` / `VAR` list applied to the guest environment |
+| `PEMU_STRACE=1` | trace guest syscalls (same as `-strace`) |
+| `PEMU_SET_ENV=A=1,B=2` | extra guest environment variables (comma separated `VAR=val`) |
 
 ## Translated
 

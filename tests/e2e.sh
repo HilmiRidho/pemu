@@ -11,7 +11,7 @@ run() {   # target emulator
     rf=$T/rf-$2; mkdir -p "$rf/etc" "$rf/tmp" "$rf/bin"
     clang --target=$1 -O1 -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -static -fuse-ld=lld -o "$rf/bin/guest" tests/e2e_guest.c
     printf 'welcome\n' > "$rf/etc/motd"; ln -s motd "$rf/etc/link"
-    PEMU_FAKE_PROC=1 timeout 60 "$B/$2" -r "$rf" -w / --root-id /bin/guest > "$T/out-$2" 2>&1 || true
+    PEMU_FAKE_PROC=1 timeout 60 "$B/$2" login "$rf" -w / /bin/guest > "$T/out-$2" 2>&1 || true
     # the fake /proc/stat is read as 5 bytes "cpu  "
     if diff -u tests/e2e.expected "$T/out-$2"; then echo "e2e $2 ($1): ok"; else echo "e2e $2 ($1): FAILED"; return 1; fi
 }

@@ -1,5 +1,5 @@
 /* target/x86_64/cpu.inc.h - guest CPU state, types, host includes. SPDX-License-Identifier: Apache-2.0 */
-/* pemu_x64 - small x86_64 user-mode emulator, a qemu-user alternative
+/* pemu_x64 - small x86_64 user-mode emulator
  * for aarch64 hosts (Termux/Android, Linux ARM).
  *
  * Guest: x86_64 Linux. Host: aarch64 (the target) or x86_64 (used for testing).
@@ -7,9 +7,8 @@
  * host pointers. Guest syscalls are translated to the host generic syscall
  * ABI (openat, newfstatat, pipe2, ...), so the same code runs on both hosts.
  *
- * Command line (qemu-user compatible):
- *     pemu [-0 argv0] [-L prefix] [-E VAR=val] [-U VAR] [-cpu x] [-strace] prog [args...]
- * Environment: QEMU_SET_ENV, QEMU_UNSET_ENV, QEMU_STRACE.
+ * Command line: pemu [-strace] [-nojit] prog [args...]   (see "pemu --help")
+ * Environment: PEMU_SET_ENV, PEMU_STRACE.
  *
  * Arithmetic flags are evaluated lazily (see mat()/RF()), and jcc/setcc/cmov after cmp/test read the operands directly.
  * CPU model: x86-64-v2 (SSE2 to SSE4.2, CMPXCHG16B, POPCNT) with an x87 subset. cpuid reports only
@@ -116,17 +115,16 @@ static void jit_atfork(int phase);
 #define PEMU_MHZ_STR   "2666.667"
 #define PEMU_BOGO_STR  "5333.33"                                              /* Linux prints about 2 x MHz */
 
-/* Exit-request words, polled by the JIT (like qemu's cpu->exit_request). They belong to the core; the OS layer sets them
+/* Exit-request words, polled by the JIT. They belong to the core; the OS layer sets them
  * (linux-user/: host signal handlers) and clears them when it has dealt with the request. */
 static volatile u64 pend;                          /* events for the main thread (the JIT polls this word) */
 static __thread volatile u64 tpend;                /* events for a CLONE_THREAD thread: delivered to that same thread, like the kernel does */
 #define PENDP() (g_is_thread ? &tpend : &pend)
-static __thread u64 g_ring[64]; static __thread unsigned g_ringi;      /* diagnostics (QEMU_STRACE): the last interpreted instruction addresses */
+static __thread u64 g_ring[64]; static __thread unsigned g_ringi;      /* diagnostics (PEMU_STRACE): the last interpreted instruction addresses */
 
 /* ------------------------------------------------------------ interface to the OS layer
  * The CPU core (target/ and tcg/) never calls into linux-user/ by name: everything that needs an operating system goes through
- * this table, which linux-user/ installs before the first guest instruction runs (the same hand-off qemu-user does when
- * cpu_exec() returns an exception to cpu_loop()).
+ * this table, which linux-user/ installs before the first guest instruction runs.
  *   syscall(c)       the guest executed `syscall`; c->rip is already the next instruction, the arguments are in c->r[]
  *                    and the result goes to c->r[RAX]
  *   exception(c, e)  the CPU raised exception e (EXCP_*, x86 vector numbers). It may return, and the core then carries on

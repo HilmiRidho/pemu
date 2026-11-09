@@ -60,7 +60,7 @@ static long do_execve(const char*path, char**argv, char**envp) {
     /* g_self is a HOST binary (bionic on Android). If the guest's LD_LIBRARY_PATH / LD_PRELOAD
        reach it, the host linker picks up guest libs (e.g. rootfs libm.so, a GNU ld script) and
        dies with "bad ELF magic". Hide those two from the host exec and hand them over through
-       QEMU_SET_ENV, which main() applies to the guest environment. */
+       PEMU_SET_ENV, which main() applies to the guest environment. */
     int ne = 0; while (envp && envp[ne]) ne++;
     char**nenv = calloc((size_t) ne + 2, sizeof *nenv);
     const char*ldl = NULL, *ldp = NULL, *oldset = NULL;
@@ -68,7 +68,7 @@ static long do_execve(const char*path, char**argv, char**envp) {
     for (int i = 0; i < ne; i++) {
         if (!strncmp(envp[i], "LD_LIBRARY_PATH=", 16)) ldl = envp[i] + 16;
         else if (!strncmp(envp[i], "LD_PRELOAD=", 11)) ldp = envp[i] + 11;
-        else if (!strncmp(envp[i], "QEMU_SET_ENV=", 13)) oldset = envp[i] + 13;
+        else if (!strncmp(envp[i], "PEMU_SET_ENV=", 13)) oldset = envp[i] + 13;
         else nenv[m++] = envp[i];
     }
     char*setv = NULL;
@@ -76,7 +76,7 @@ static long do_execve(const char*path, char**argv, char**envp) {
         size_t cap = 32 + (ldl ? strlen(ldl) : 0) + (ldp ? strlen(ldp) : 0) + (oldset ? strlen(oldset) : 0);
         setv = malloc(cap);
         if (setv) {
-            int o = snprintf(setv, cap, "QEMU_SET_ENV=");
+            int o = snprintf(setv, cap, "PEMU_SET_ENV=");
             if (oldset && *oldset) o += snprintf(setv + o, cap - (size_t) o, "%s,", oldset);
             if (ldp) o += snprintf(setv + o, cap - (size_t) o, "LD_PRELOAD=%s,", ldp);
             if (ldl) o += snprintf(setv + o, cap - (size_t) o, "LD_LIBRARY_PATH=%s,", ldl);

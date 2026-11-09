@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build pemu and pemu_x64, check the CPU core in isolation, then run the tests. Run from anywhere; the script cd's to its own directory.
 #
-# Layout (modelled on qemu-user): pemu.c / pemu_x64.c are entry files that include target/<arch>/ (guest CPU),
+# Layout : pemu.c / pemu_x64.c are entry files that include target/<arch>/ (guest CPU),
 # tcg/<host>/ (JIT) and linux-user/<arch>/ (syscalls, signals, ELF, main). linux-user/pemu_root.h (parts in linux-user/proot/) is the built-in proot.
 #
 # Outputs (in $OUT):

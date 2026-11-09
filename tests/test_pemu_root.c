@@ -254,7 +254,7 @@ int main(void) {
         { char *u[] = { "pemu", "uninstall", "..", "-y" }; CHECK(pemu_uninstall(4, u) == 2, ".. rejected"); }
         { char *u[] = { "pemu", "uninstall", "nope", "-y" }; CHECK(pemu_uninstall(4, u) == 1, "missing rootfs"); }
         { char *u[] = { "pemu", "uninstall", "lnk", "-y" }; CHECK(pemu_uninstall(4, u) == 0 && pemu_isdir("/tmp/pemu-test/rfs/deb"), "symlink: only the link goes"); }
-        { char *u[] = { "pemu", "rm", "deb", "--yes" }; CHECK(pemu_uninstall(4, u) == 0 && access("/tmp/pemu-test/rfs/deb", F_OK) != 0, "rootfs removed (read-only dirs included)"); }
+        { char *u[] = { "pemu", "uninstall", "deb", "--yes" }; CHECK(pemu_uninstall(4, u) == 0 && access("/tmp/pemu-test/rfs/deb", F_OK) != 0, "rootfs removed (read-only dirs included)"); }
         CHECK(access("/tmp/pemu-test/keep/f", F_OK) == 0, "symlink target outside the rootfs must survive");
         CHECK(pemu_isdir("/tmp/pemu-test/rfs/other"), "other rootfs untouched");
         unsetenv("PEMU_ROOTFS_DIR");

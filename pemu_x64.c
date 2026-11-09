@@ -1,5 +1,5 @@
 /* pemu_x64 - x86_64 Linux guest user-mode emulator (entry file; see the included parts). */
-/* Layout modelled on qemu-user: target/ = guest CPU, tcg/ = JIT back end, linux-user/ = Linux syscall/signal/ELF layer. */
+/* Layout: target/ = guest CPU, tcg/ = JIT back end, linux-user/ = Linux syscall/signal/ELF layer. */
 /* The parts are included in dependency order and form a single translation unit. */
 #ifndef PEMU_RELEASE
 #define PEMU_RELEASE "dev"   /* build.sh sets it from the VERSION file */

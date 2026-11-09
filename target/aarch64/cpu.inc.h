@@ -1,13 +1,12 @@
 /* target/aarch64/cpu.inc.h - guest CPU state, types, host includes. SPDX-License-Identifier: Apache-2.0 */
 /* pemu - small aarch64 user-mode emulator for x86_64 Linux hosts.
  *
- * A minimal, self-written replacement for qemu-user. It interprets AArch64 code,
+ * A minimal, self-written user-mode emulator. It interprets AArch64 code,
  * maps the guest 1:1 into the host address space (so guest pointers are host
  * pointers) and translates guest Linux syscalls to host syscalls.
  *
- * Command line (qemu-user compatible):
- *     pemu [-0 argv0] [-L prefix] [-E VAR=val] [-U VAR] [-cpu x] [-strace] prog [args...]
- * Environment: QEMU_SET_ENV, QEMU_UNSET_ENV, QEMU_STRACE are honoured.
+ * Command line: pemu [-strace] [-nojit] prog [args...]   (see "pemu --help")
+ * Environment: PEMU_SET_ENV, PEMU_STRACE.
  *
  * Supported: integer ISA, load/store (incl. exclusives, SIMD&FP register
  * forms, LD1/ST1), scalar FP, a small NEON subset, fork/exec, signals.
@@ -65,14 +64,13 @@ static u64 jit_rip2pc(u64 rip);
 static void jit_syscall_hook(u64 n, u64 a0, u64 a1, u64 a2, u64 a3);
 
 
-/* Exit-request word, polled by the JIT (like qemu's cpu->exit_request); set by the OS layer's host signal handlers. */
+/* Exit-request word, polled by the JIT; set by the OS layer's host signal handlers. */
 static volatile u64 pend;
 static sigjmp_buf g_jb;                 /* where a host fault in guest code lands (sigsetjmp in the run loops) */
 
 /* ------------------------------------------------------------ interface to the OS layer
  * The CPU core (target/ and tcg/) never calls into linux-user/ by name: everything that needs an operating system goes through
- * this table, which linux-user/ installs before the first guest instruction runs (the same hand-off qemu-user does when
- * cpu_exec() returns an exception to cpu_loop()).
+ * this table, which linux-user/ installs before the first guest instruction runs.
  *   syscall(c)       the guest executed `svc`; c->pc is already the next instruction, the arguments are in c->x[]
  *   exception(c, e)  the CPU raised exception e (EXCP_*). It may return, and the core then carries on, or it may terminate
  *   pending(c)       the exit-request word is non-zero: deliver the queued guest signals
