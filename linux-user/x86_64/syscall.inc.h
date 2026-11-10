@@ -658,7 +658,7 @@ static int pemu_x64_sys(u64 n, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, l
     case 113: RET(pemu_idcall(PEMU_SETREUID, a0, a1, 0));  case 114: RET(pemu_idcall(PEMU_SETREGID, a0, a1, 0));
     case 117: RET(pemu_idcall(PEMU_SETRESUID, a0, a1, a2)); case 119: RET(pemu_idcall(PEMU_SETRESGID, a0, a1, a2));
     case 122: RET(pemu_idcall(PEMU_SETFSUID, a0, 0, 0));   case 123: RET(pemu_idcall(PEMU_SETFSGID, a0, 0, 0));
-    case 93: RET(pemu_force(hs(SYS_fchown, (long) a0, (long) pemu_chown_id(a1, pemu_uid, getuid()), (long) pemu_chown_id(a2, pemu_gid, getgid()), 0, 0, 0)));
+    case 93: RET(pemu_force_acc(hs(SYS_fchown, (long) a0, (long) pemu_chown_id(a1, pemu_uid, getuid()), (long) pemu_chown_id(a2, pemu_gid, getgid()), 0, 0, 0)));
     case 91: RET(pemu_force(hs(SYS_fchmod, (long) a0, (long) a1, 0, 0, 0, 0)));
     case 190: RET(pemu_force(hs(SYS_fsetxattr, (long) a0, (long) a1, (long) a2, (long) a3, (long) a4, 0)));
     case 126: RET(pemu_force_ns(hs(SYS_capset, (long) a0, (long) a1, 0, 0, 0, 0)));
