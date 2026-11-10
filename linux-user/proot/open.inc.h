@@ -4,6 +4,19 @@
  * directory for a symlink in between. For the rootfs the final open is therefore done as
  * openat2(rootfd, guest-path, RESOLVE_IN_ROOT), which the kernel itself keeps inside the rootfs.
  * PEMU_SECURE_OPEN=0/1 overrides the default (off on Android, whose seccomp filter may reject openat2). */
+/* Fake root (-0): the host kernel still sees the plain Termux user, but a real root opens files whose permission bits forbid it
+ * (dpkg re-opens a 0440 conffile such as /etc/sudoers.d/README O_WRONLY for fsync). The file belongs to the host user, so add the
+ * missing bits for the duration of the open and put the old mode back through the new fd. */
+static long pemu_open_priv(const char *host, long hf, long mode) {
+    struct stat st; int acc = (int) (hf & O_ACCMODE);
+    if (!PEMU_PRIV() || geteuid() == 0 || stat(host, &st) != 0) return -EACCES;
+    if (st.st_uid != geteuid() || !(S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) return -EACCES;
+    mode_t need = (acc != O_RDONLY ? 0200 : 0) | (acc != O_WRONLY ? 0400 : 0), old = st.st_mode & 07777;
+    if ((old & need) == need || chmod(host, old | need) != 0) return -EACCES;
+    long fd = hs(SYS_openat, AT_FDCWD, (long) host, hf, mode, 0, 0);
+    if (fd >= 0) fchmod((int) fd, old); else chmod(host, old);
+    return fd;
+}
 static long pemu_open(long dfd, const char *p, long hf, long mode, unsigned rf) {
     char host[PEMU_HP], gc[PATH_MAX];
     int fol = !(hf & O_NOFOLLOW) && !((hf & O_CREAT) && (hf & O_EXCL));
@@ -33,6 +46,7 @@ static long pemu_open(long dfd, const char *p, long hf, long mode, unsigned rf) 
         if (rf & PEMU_RS_NO_MAGICLINK) { uint64_t how[3] = { (uint64_t) hf, (uint64_t) mode, PEMU_RS_NO_MAGICLINK }; fd = hs(SYS_openat2, AT_FDCWD, (long) host, (long) how, (long) sizeof how, 0, 0); }
         if (fd == -ENOSYS) fd = hs(SYS_openat, AT_FDCWD, (long) host, hf, mode, 0, 0);
     }
+    if (fd == -EACCES) { long pf = pemu_open_priv(host, hf, mode); if (pf >= 0) return pf; }
     if (fd < 0 && (fd == -EACCES || fd == -ENOENT || fd == -EPERM) && (f = pemu_fakeproc_open(gc, hf)) != LONG_MIN) return f;
     return fd;
 }
