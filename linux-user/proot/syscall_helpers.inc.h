@@ -47,7 +47,7 @@ static long pemu_callat(long nr, long dfd, const char *p, int follow, long a2, l
     if (r < 0) return r;
     long x = r == 0 ? hs(nr, (long) AT_FDCWD, (long) host, a2, a3, a4, a5) : hs(nr, dfd, (long) p, a2, a3, a4, a5);
     if (tfd >= 0) close(tfd);
-    if (pemu_forced(nr)) x = pemu_force(x);
+    if (pemu_forced(nr)) x = (nr == SYS_fchownat) ? pemu_force_acc(x) : pemu_force(x);
     if (r == 0 && (nr == SYS_newfstatat || nr == SYS_statx) && (x == -ENOENT || x == -EACCES || x == -EPERM)) {   /* hidden /proc file that pemu fakes on open */
         char gc[PATH_MAX]; struct stat fs;
         if (pemu_path(dfd, p, follow, host, sizeof host, gc) == 0 && pemu_fakeproc_stat(gc, &fs) == 0) {
@@ -69,7 +69,7 @@ static long pemu_call1(long nr, const char *p, int follow, long a1, long a2, lon
     if (r < 0) return r;
     long x = hs(nr, (long) (r == 0 ? host : p), a1, a2, a3, a4, a5);
     if (tfd >= 0) close(tfd);
-    if (pemu_forced(nr)) x = pemu_force(x);
+    if (pemu_forced(nr)) x = (nr == SYS_fchownat) ? pemu_force_acc(x) : pemu_force(x);
     return x;
 }
 /* nr(olddfd, old, newdfd, new, flags) : rename / renameat2 / link */

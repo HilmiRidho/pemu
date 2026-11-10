@@ -57,6 +57,8 @@ static unsigned pemu_at_egid(void) { return pemu_fakeroot ? pemu_gid[PEMU_E] : (
 static long pemu_force(long r) { return (r == -EPERM && PEMU_PRIV()) ? 0 : r; }
 /* as pemu_force, but also for calls the host (Android seccomp) answers with ENOSYS: setgroups, capset */
 static long pemu_force_ns(long r) { return ((r == -EPERM || r == -ENOSYS) && PEMU_PRIV()) ? 0 : r; }
+/* chown: a real root is never refused for access reasons, but Android answers EACCES for e.g. chown(/dev/pts/N) from grantpt() */
+static long pemu_force_acc(long r) { return ((r == -EPERM || r == -EACCES) && PEMU_PRIV()) ? 0 : r; }
 /* chown(2): the fake real id is swapped for the true one, so the host has a chance to accept it */
 static unsigned long pemu_chown_id(unsigned long v, const unsigned *fake, unsigned real) {
     return (pemu_fakeroot && (unsigned) v == fake[PEMU_R]) ? (unsigned long) real : v;
