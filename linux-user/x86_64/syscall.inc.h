@@ -645,6 +645,8 @@ static long do_clone3(CPU*c, const u8*uargs, u64 size, int*noset) {
 static int pemu_x64_sys(u64 n, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, long *res) {
 #define RET(x) do { *res = (x); return 1; } while (0)
     switch (n) {                                       /* hostname / domainname with -k */
+    case 41: if ((int) a0 == 16 && (int) a2 == 9) RET(-EPROTONOSUPPORT);   /* NETLINK_AUDIT: shadow (useradd) and sudo treat this as "no audit" and go on */
+             break;
     case 170: case 171: { long r; if (pemu_set_uts_name(n == 171, (const char*) a0, (size_t) a1, &r)) RET(r);
                           RET(pemu_force(hs(n == 170 ? SYS_sethostname : SYS_setdomainname, (long) a0, (long) a1, 0, 0, 0, 0))); }
     }
@@ -659,8 +661,8 @@ static int pemu_x64_sys(u64 n, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, l
     case 93: RET(pemu_force(hs(SYS_fchown, (long) a0, (long) pemu_chown_id(a1, pemu_uid, getuid()), (long) pemu_chown_id(a2, pemu_gid, getgid()), 0, 0, 0)));
     case 91: RET(pemu_force(hs(SYS_fchmod, (long) a0, (long) a1, 0, 0, 0, 0)));
     case 190: RET(pemu_force(hs(SYS_fsetxattr, (long) a0, (long) a1, (long) a2, (long) a3, (long) a4, 0)));
-    case 126: RET(pemu_force(hs(SYS_capset, (long) a0, (long) a1, 0, 0, 0, 0)));
-    case 116: RET(pemu_force(hs(SYS_setgroups, (long) a0, (long) a1, 0, 0, 0, 0)));
+    case 126: RET(pemu_force_ns(hs(SYS_capset, (long) a0, (long) a1, 0, 0, 0, 0)));
+    case 116: RET(pemu_force_ns(hs(SYS_setgroups, (long) a0, (long) a1, 0, 0, 0, 0)));
     }
     if (!pemu_on) {                                    /* no rootfs: only what a fake root needs forced */
         if (!pemu_fakeroot) return 0;
