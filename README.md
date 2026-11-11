@@ -79,6 +79,7 @@ directories on another device alone. Without `-y` it asks on the terminal and re
 | `PEMU_FAKE_PROC=1` | always serve the fake `/proc` files |
 | `PEMU_FAKE_OWNER=0` | do not remember `chown` results (see "Fake owners") |
 | `PEMU_JIT=0` | use the interpreter instead of the JIT |
+| `PEMU_JIT_STATS=1` / `PEMU_JIT_OPT=mask` | print JIT statistics / toggle optional JIT translations (for diagnosing speed or a misbehaving guest) |
 | `PEMU_STRACE=1` | trace guest syscalls |
 | `PEMU_SET_ENV=A=1,B=2` | extra guest environment variables |
 
