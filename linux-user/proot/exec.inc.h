@@ -56,6 +56,23 @@ static long pemu_exec_resolve(const char *gpath, char **argv, char ***argvp, cha
     }
     return -ELOOP;
 }
+/* The first command of `pemu login NAME cmd`: execve takes the name as given, but a bare name is meant to be found in PATH
+ * (`pemu login debian apt update`).  The name as given is tried first, so nothing that worked before changes; only an ENOENT
+ * falls back to the directories of PATH (the guest's, set by login), and an unreadable match is reported as EACCES like a shell. */
+static long pemu_exec_resolve_cmd(const char *prog, char **argv, char ***argvp, char *host, char *gprog) {
+    long r = pemu_exec_resolve(prog, argv, argvp, host, gprog);
+    const char *p = getenv("PATH");
+    if (r != -ENOENT || !*prog || strchr(prog, '/') || !p || !*p) return r;
+    long best = r; char *dup = strdup(p), *sp, *d;
+    if (!dup) return r;
+    for (d = strtok_r(dup, ":", &sp); d; d = strtok_r(NULL, ":", &sp)) {
+        char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", d, prog);
+        long e = pemu_exec_resolve(cand, argv, argvp, host, gprog);
+        if (e == 0) { free(dup); return 0; }
+        if (e == -EACCES) best = e;
+    }
+    free(dup); return best;
+}
 /* options that make a re-exec'd pemu rebuild the same state (table, cwd, identity, -k, placeholders); returns the new k */
 static int pemu_reexec_opts(char **nv, int k) {
     char *rt = malloc(PATH_MAX); pemu_root_get(rt);       /* a copy: chroot may rewrite pemu_root while this argv is being built */
