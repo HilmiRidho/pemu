@@ -189,6 +189,11 @@ static void step(CPU*c) {
     case 0x9D: { u64 v = pop(c); RF(c) = (v & (CF_ | PF_ | AF_ | ZF_ | SF_ | DF_ | OF_)) | 0x202; break; }
     case 0x9E: { u64 ah = (c->r[RAX] >> 8) & 0xff; RF(c) = (RF(c) & ~(u64)(CF_ | PF_ | AF_ | ZF_ | SF_)) | (ah & (CF_ | PF_ | AF_ | ZF_ | SF_)); break; }
     case 0x9F: setr(c, 4, 1, 0, (RF(c) & (CF_ | PF_ | AF_ | ZF_ | SF_)) | 2); break;
+    case 0xA0: case 0xA1: case 0xA2: case 0xA3: {                /* mov al/ax/eax/rax <-> [moffs]: the address is an immediate (4 bytes with a 0x67 prefix) */
+        int sz = (op & 1) ? opsz : 1; u64 off;
+        if (in.addr32) { off = *(u32u*) in.ip; in.ip += 4; } else { off = *(u64u*) in.ip; in.ip += 8; }
+        if (op < 0xA2) setr(c, RAX, sz, 0, mrd(off + in.seg, sz)); else mwr(off + in.seg, getr(c, RAX, sz, 0), sz);
+        break; }
     case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF: {
         int sz = (op & 1) ? opsz : 1; s64 dl = (RF(c) & DF_) ? -sz : sz;
         int isrep = in.rep || in.repne, kind = op >= 0xAE ? 4 : op >= 0xAC ? 3 : op >= 0xAA ? 2 : op >= 0xA6 ? 1 : 0;
