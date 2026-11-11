@@ -140,7 +140,7 @@ static int pemu_login(int *pargc, char ***pargv) {
     char termv[128], ctv[64], langv[64];
     snprintf(termv, sizeof termv, "%s", term && *term ? term : "xterm-256color"); snprintf(ctv, sizeof ctv, "%s", ct ? ct : ""); snprintf(langv, sizeof langv, "%s", lang && *lang ? lang : "C.UTF-8");
     char ps[1024] = ""; { const char *v = getenv("PEMU_SET_ENV"); if (v) snprintf(ps, sizeof ps, "%s", v); }
-    static const char *keep[] = { "PEMU_SECURE_OPEN", "PEMU_FAKE_PROC", "PEMU_JIT", "PEMU_STRACE", "PEMU_FAKE_OWNER" };   /* pemu's own settings survive clearenv */
+    static const char *keep[] = { "PEMU_SECURE_OPEN", "PEMU_FAKE_PROC", "PEMU_JIT", "PEMU_JIT_STATS", "PEMU_JIT_OPT", "PEMU_STRACE", "PEMU_FAKE_OWNER" };   /* pemu's own settings survive clearenv */
     char kv[sizeof keep / sizeof *keep][256]; int kh[sizeof keep / sizeof *keep];
     for (unsigned q = 0; q < sizeof keep / sizeof *keep; q++) { const char *v = getenv(keep[q]); kh[q] = v != NULL; if (v) snprintf(kv[q], sizeof kv[q], "%s", v); }
     (void) pemu_secure();                                 /* decide "openat2 on/off" while ANDROID_ROOT is still there; clearenv() drops it */
