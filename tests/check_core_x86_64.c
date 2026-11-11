@@ -1,0 +1,17 @@
+#include "target/x86_64/cpu.inc.h"
+#include "target/x86_64/flags_mem.inc.h"
+#include "target/x86_64/decode.inc.h"
+#include "target/x86_64/sse2.inc.h"
+#include "target/x86_64/mmx.inc.h"
+#include "target/x86_64/ssse3_sse4.inc.h"
+#include "target/x86_64/x87.inc.h"
+#include "target/x86_64/interp.inc.h"
+#ifdef HAVE_JIT
+#include "tcg/aarch64/tcg_target.inc.h"
+#include "tcg/aarch64/emit.inc.h"
+#include "tcg/aarch64/guest_state.inc.h"
+#include "tcg/aarch64/block_cache.inc.h"
+#include "tcg/aarch64/decode.inc.h"
+#include "tcg/aarch64/codegen.inc.h"
+#include "tcg/aarch64/translate.inc.h"
+#endif

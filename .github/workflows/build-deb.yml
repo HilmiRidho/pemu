@@ -1,0 +1,84 @@
+name: build-deb
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debian:
+    name: debian ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    # bookworm = old glibc, so the .deb also installs on Debian 12+ and recent Ubuntu
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: apt-get update && apt-get install -y --no-install-recommends build-essential dpkg-dev clang lld
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=$(tr -d ' \n' < VERSION)+git$(echo "$GITHUB_SHA" | cut -c1-7); fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build and test
+        run: ./build.sh
+      - name: Package
+        run: packaging/build-deb.sh debian ${{ matrix.arch }} ${{ steps.v.outputs.version }} build dist
+      - name: Smoke test install
+        run: |
+          apt-get install -y ./dist/*.deb
+          pemu --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-debian-${{ matrix.arch }}
+          path: dist/*.deb
+
+  termux:
+    name: termux aarch64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=$(tr -d ' \n' < VERSION)+git$(echo "$GITHUB_SHA" | cut -c1-7); fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Cross-build with Android NDK (bionic, API 24)
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$bin/aarch64-linux-android24-clang" ARCH=aarch64 SKIP_TESTS=1 ./build.sh
+          file build/pemu build/pemu_x64
+      - name: Package
+        run: packaging/build-deb.sh termux aarch64 ${{ steps.v.outputs.version }} build dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-termux-aarch64
+          path: dist/*.deb
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [debian, termux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
