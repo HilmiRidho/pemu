@@ -24,7 +24,7 @@ int main(int argc, char**argv) {
         snprintf(xp, sizeof xp, "/proc/self/fd/%d", pemu_execfd); loadp = xp;
         if (pemu_on) snprintf(pemu_exe, sizeof pemu_exe, "%s", prog);
     } else if (pemu_on) {
-        char**nv; long e = pemu_exec_resolve(prog, pav, &nv, hostprog, gprog);
+        char**nv; long e = pemu_exec_resolve_cmd(prog, pav, &nv, hostprog, gprog);
         if (e < 0) { fprintf(stderr, "pemu: %s: %s\n", prog, strerror((int) -e)); return 127; }
         pav = nv; pac = 0; while (pav[pac]) pac++;
         loadp = hostprog; prog = gprog; snprintf(pemu_exe, sizeof pemu_exe, "%s", gprog);
