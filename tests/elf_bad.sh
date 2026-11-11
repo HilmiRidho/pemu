@@ -53,6 +53,12 @@ timeout 60 "$B/pemu_x64" "$T/shared_page" >"$T/out" 2>&1; r=$?
 [ $r -eq 0 ] || { echo "elf_bad: two segments sharing a page must both load (exit $r): $(cat "$T/out")"; rc=1; }
 timeout 60 "$B/pemu_x64" "$T/moffs" >"$T/out" 2>&1; r=$?
 [ $r -eq 0 ] || { echo "elf_bad: mov to/from a 64-bit absolute address must run (exit $r): $(cat "$T/out")"; rc=1; }
+# `pemu login NAME cmd`: a bare command name is looked up in PATH (inside the rootfs) when the name as given does not exist
+mkdir -p "$T/rfp/usr/bin"; cp "$T/moffs" "$T/rfp/usr/bin/mo"; chmod 755 "$T/rfp/usr/bin/mo"
+PATH=/usr/local/bin:/usr/bin timeout 60 "$B/pemu_x64" -r "$T/rfp" -w / -- mo >"$T/out" 2>&1; r=$?
+[ $r -eq 0 ] || { echo "elf_bad: a bare command name must be found in PATH (exit $r): $(cat "$T/out")"; rc=1; }
+PATH=/usr/local/bin:/usr/bin timeout 60 "$B/pemu_x64" -r "$T/rfp" -w / -- nonexistent >"$T/out" 2>&1; r=$?
+{ [ $r -eq 127 ] && grep -q "nonexistent: No such file" "$T/out"; } || { echo "elf_bad: a missing command must still fail with ENOENT, exit 127 (exit $r): $(cat "$T/out")"; rc=1; }
 for n in filesz_gt_memsz no_load bad_phentsize et_rel wrapped_vaddr huge_memsz; do
     timeout 60 "$B/pemu_x64" "$T/$n" >"$T/out" 2>&1; r=$?
     if [ $r -eq 127 ] && grep -q "^pemu: .*$n: " "$T/out"; then :; else echo "elf_bad: $n must be refused with exit 127 and a message (exit $r): $(cat "$T/out")"; rc=1; fi
