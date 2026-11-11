@@ -25,6 +25,19 @@ eh2 = b"\x7fELF\x02\x01\x01" + b"\0" * 9 + struct.pack("<HHIQQQIHHHHHH", 2, 62, 
 b2 = bytearray(eh2 + ph2); b2 += b"\0" * (0xc0 - len(b2)) + code2      # two program headers end at 0xb0
 b2 += b"\0" * (0x10f0 - len(b2)) + b"\x5a"; b2 += b"\0" * (0x1800 - len(b2)) + b"\x77" + b"\0" * 7
 open(d + "/shared_page", "wb").write(bytes(b2))
+# mov rax,[moffs64] / mov [moffs64],rax / mov al,[moffs64] / mov [moffs64],al / mov eax,[moffs32] (0x67): opcodes A0-A3, which the
+# interpreter did not know (node/npm hit them).  The code exits 0 only if every load and store behaved.
+def le(v, n): return v.to_bytes(n, "little")
+code3 = (b"\x48\xa1" + le(0x10000200, 8) + b"\x48\xa3" + le(0x10000208, 8)
+         + bytes.fromhex("488b142508020010" "4831c2" "4889d7" "48c1ef20" "09d7")
+         + b"\xa0" + le(0x10000200, 8) + b"\xa2" + le(0x10000210, 8)
+         + bytes.fromhex("0fb60c2510020010" "81f188000000" "09cf")
+         + b"\x67\xa1" + le(0x10000200, 4) + bytes.fromhex("3588776655" "09c7" "b83c000000" "0f05"))
+ph3 = struct.pack("<IIQQQQQQ", 1, 7, 0, 0x10000000, 0x10000000, 0x1000, 0x1000, 0x1000)
+eh3 = b"\x7fELF\x02\x01\x01" + b"\0" * 9 + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0x10000080, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+b3 = bytearray(eh3 + ph3); b3 += b"\0" * (0x80 - len(b3)) + code3
+b3 += b"\0" * (0x200 - len(b3)) + le(0x1122334455667788, 8); b3 += b"\0" * (0x1000 - len(b3))
+open(d + "/moffs", "wb").write(bytes(b3))
 elf("filesz_gt_memsz", phs=[(1, 5, 0, 0x10000000, 0x100000, 0x80 + len(code))])
 elf("no_load", phs=[(4, 4, 0, 0x10000000, 0, 0)])
 elf("bad_phentsize", phentsize=0)
@@ -38,6 +51,8 @@ timeout 60 "$B/pemu_x64" "$T/ok" >"$T/out" 2>&1; r=$?
 [ $r -eq 0 ] || { echo "elf_bad: the valid hand-made file must run (exit $r): $(cat "$T/out")"; rc=1; }
 timeout 60 "$B/pemu_x64" "$T/shared_page" >"$T/out" 2>&1; r=$?
 [ $r -eq 0 ] || { echo "elf_bad: two segments sharing a page must both load (exit $r): $(cat "$T/out")"; rc=1; }
+timeout 60 "$B/pemu_x64" "$T/moffs" >"$T/out" 2>&1; r=$?
+[ $r -eq 0 ] || { echo "elf_bad: mov to/from a 64-bit absolute address must run (exit $r): $(cat "$T/out")"; rc=1; }
 for n in filesz_gt_memsz no_load bad_phentsize et_rel wrapped_vaddr huge_memsz; do
     timeout 60 "$B/pemu_x64" "$T/$n" >"$T/out" 2>&1; r=$?
     if [ $r -eq 127 ] && grep -q "^pemu: .*$n: " "$T/out"; then :; else echo "elf_bad: $n must be refused with exit 127 and a message (exit $r): $(cat "$T/out")"; rc=1; fi
