@@ -229,6 +229,15 @@ static int simd_insn(CPU*c, u32 i) {
         default: return -1;
         }
     }
+    if ((i & 0xBFE08C00) == 0x0E000000) {                      /* TBL / TBX: byte table lookup in 1-4 registers (out-of-range index: 0 / unchanged) */
+        int len = ((i >> 13) & 3) + 1, tbx = (i >> 12) & 1, nb = q ? 16 : 8;
+        u8 tab[64], idx[16], res[16];
+        for (int k = 0; k < len; k++) memcpy(tab + 16 * k, c->v[(rn + k) & 31], 16);
+        memcpy(idx, c->v[rm], 16); memcpy(res, c->v[rd], 16);
+        for (int k = 0; k < nb; k++) res[k] = idx[k] < 16 * len ? tab[idx[k]] : (tbx ? res[k] : 0);
+        for (int k = nb; k < 16; k++) res[k] = 0;
+        memcpy(c->v[rd], res, 16); return 0;
+    }
     if ((i & 0x9FF80400) == 0x0F000400) {                      /* modified immediate: MOVI / MVNI / ORR / BIC / FMOV (vector) */
         int cm = (i >> 12) & 15, op = (i >> 29) & 1;
         u64 imm8 = (((i >> 16) & 7) << 5) | ((i >> 5) & 31), v = 0, w;
