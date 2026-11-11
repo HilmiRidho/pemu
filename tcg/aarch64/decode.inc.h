@@ -2,7 +2,7 @@
 /* ------------------------------------------------------------ decoder (static, no guest state) */
 enum { OT_NONE, OT_REG, OT_MEM, OT_IMM };
 enum { JO_FB, JO_FBT, JO_NOP, JO_MOV, JO_MOVX, JO_LEA, JO_PUSH, JO_POP, JO_ALU, JO_NOT, JO_NEG, JO_SHIFT, JO_IMUL,
-       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
+       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_BT, JO_XRR, JO_DF, JO_XLH, JO_POPCNT, JO_PSHUFB, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
 typedef struct {
     u64 ip, imm, target; s64 disp;
     u8 len, op, sz, sz2, t, fr, fw, at, bt, ar, br, rex, lva, lvb, scale, seg, sx, cnt, nost, incdec, mmx, lk;
@@ -87,6 +87,8 @@ static const u8 *jfb_end(const u8 *p, int p66, int rexw, int *neutral, int *term
         case 0x0D: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: *neutral = 1; return jmodrm_skip(p);
         case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
         case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8C: case 0x8D: case 0x8E: case 0x8F: *term = 1; return p + 4;
+        case 0x38: { u8 o3 = *p++; *neutral = !(o3 == 0x17 || o3 == 0xF6); return jmodrm_skip(p); }       /* SSSE3/SSE4/AES/crc32/movbe: all flag-neutral except ptest and adcx/adox */
+        case 0x3A: { u8 o3 = *p++; *neutral = !(o3 >= 0x60 && o3 <= 0x63); return jmodrm_skip(p) + 1; }  /* palignr, pblendw, round*, pextr*, pinsr*, pclmulqdq: imm8; pcmp[ie]str[im] write the flags */
         case 0xBA: case 0xA4: case 0xAC: return jmodrm_skip(p) + 1;
         case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
         case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
@@ -187,7 +189,12 @@ static int jdecode(JI *j, u64 ip) {
         if (!(g_jopt & JOPT_ATOM) || lock) FB();
         j->op = JO_XCHGA; j->sz = (u8) opsz; j->ar = (u8)((op & 7) | rexB); break;                       /* xchg rax, r */
     case 0x86: case 0x87:                                                                                  /* xchg r, m: implicitly locked */
-        j->sz = (op & 1) ? (u8) opsz : 1; jmodrm(&p, j, &m, 0); if (BADA(m) || !m.ismem) FB();
+        j->sz = (op & 1) ? (u8) opsz : 1; jmodrm(&p, j, &m, 0);
+        if (!m.ismem) {                                                                                    /* xchg r, r: no atomicity, no flags */
+            if (lock || !(g_jopt & JOPT_MISC)) FB();
+            j->op = JO_XRR; j->ar = (u8) m.rm; j->br = (u8) m.reg; break;
+        }
+        if (BADA(m)) FB();
         j->op = JO_XCHG; SETRM(m, 0); j->bt = OT_REG; j->br = (u8) m.reg; break;
     case 0x98: if (opsz == 2) FB(); j->op = JO_CWDE; j->sz = (u8) opsz; break;
     case 0x99: if (opsz == 2) FB(); j->op = JO_CDQ; j->sz = (u8) opsz; break;
@@ -210,7 +217,8 @@ static int jdecode(JI *j, u64 ip) {
         j->op = JO_SHIFT; j->sz = (u8) sz; j->t = (u8) t; SETRM(m, 0);
         j->cnt = op <= 0xC1 ? 0 : op <= 0xD1 ? 1 : 2;
         if (j->cnt == 0) j->imm = (u8) *p++ & (sz == 8 ? 63 : 31); else if (j->cnt == 1) j->imm = 1;
-        if (j->cnt == 2 || !j->imm || t < 2 || sz < 4) j->fr = 1; else j->fw = 1;      /* 8/16-bit: fr, so the interpreter fallback sees the merged flags */
+        int nat8 = sz < 4 && t >= 4 && j->cnt != 2 && j->imm >= 1 && (int) j->imm < sz * 8 && (g_jopt & JOPT_SHFL);   /* 8/16-bit shl/shr/sar by 1..bits-1 keep their flags lazy too */
+        if (j->cnt == 2 || !j->imm || t < 2 || (sz < 4 && !nat8)) j->fr = 1; else j->fw = 1;      /* otherwise 8/16-bit: fr, so the interpreter fallback sees the merged flags */
         break; }
     case 0xC2: j->op = JO_RET; j->imm = (u16)(*p | p[1] << 8); p += 2; break;
     case 0xC3: j->op = JO_RET; break;
@@ -221,6 +229,7 @@ static int jdecode(JI *j, u64 ip) {
         if (j->sz == 1) j->imm = (u8) *p++; else IMMZ(j->imm);
         break; }
     case 0xC9: j->op = JO_LEAVE; break;
+    case 0xFC: case 0xFD: if (!(g_jopt & JOPT_MISC) || lock || p66) FB(); j->op = JO_DF; j->t = op & 1; break;       /* cld / std: DF lives in c->rf, which lazy flags leave alone */
     case 0xE8: case 0xE9: {
         s32 rel = rd32s(p); p += 4; j->len = (u8)(p - s);
         j->op = op == 0xE8 ? JO_CALL : JO_JMP; j->target = ip + j->len + (u64)(s64) rel; j->imm = ip + j->len; return 1; }
@@ -369,6 +378,37 @@ static int jdecode(JI *j, u64 ip) {
         case 0xBC: case 0xBD:                                /* bsf/bsr, with F3: tzcnt/lzcnt (translated only when the flags are dead) */
             jmodrm(&p, j, &m, 0); if (BADM(m) || opsz == 2 || pf2) FB();
             j->op = JO_BSF; j->sz = (u8) opsz; j->t = (u8)(o2 & 1); j->sz2 = (u8) pf3; j->fw = 1; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;
+        case 0xA3: case 0xAB: case 0xB3: case 0xBB:          /* bt/bts/btr/btc r/m, r (a lock prefix: interpreter) */
+            if (!(g_jopt & JOPT_MISC) || pf3 || pf2) FB();
+            jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
+            j->op = JO_BT; j->sz = (u8) opsz; j->t = (u8)(o2 == 0xA3 ? 0 : o2 == 0xAB ? 1 : o2 == 0xB3 ? 2 : 3); j->fr = 1;   /* fr: the flags other than CF are kept */
+            SETRM(m, 0); j->bt = OT_REG; j->br = (u8) m.reg; break;
+        case 0xBA: {                                         /* bt/bts/btr/btc r/m, imm8 */
+            if (!(g_jopt & JOPT_MISC) || pf3 || pf2) FB();
+            jmodrm(&p, j, &m, 1); if (BADM(m) || (m.reg & 7) < 4) FB();
+            j->op = JO_BT; j->sz = (u8) opsz; j->t = (u8)((m.reg & 7) - 4); j->fr = 1; SETRM(m, 0); j->bt = OT_IMM; j->imm = *p++; break; }
+        case 0xB8:                                           /* popcnt (F3 0F B8) */
+            if (!(g_jopt & JOPT_MISC) || !pf3 || pf2) FB();
+            jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
+            j->op = JO_POPCNT; j->sz = (u8) opsz; j->fw = 1; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;
+        case 0x12: case 0x13: case 0x16: case 0x17: {        /* movlps/movlpd/movhps/movhpd, movhlps/movlhps */
+            if (!(g_jopt & JOPT_MISC) || pf3 || pf2) FB();
+            jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
+            int st = o2 & 1;
+            j->op = JO_XLH;
+            if (m.ismem) {
+                j->t = (u8)((o2 >= 0x16 ? 1 : 0) + (st ? 2 : 0));                       /* 0 load low, 1 load high, 2 store low, 3 store high */
+                if (st) { SETRM(m, 0); j->bt = OT_REG; j->br = (u8) m.reg; } else { j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); }
+            } else {
+                if (p66 || st) FB();
+                j->t = o2 == 0x12 ? 4 : 5;                                                  /* movhlps / movlhps */
+                j->at = OT_REG; j->ar = (u8) m.reg; j->bt = OT_REG; j->br = (u8) m.rm;
+            }
+            break; }
+        case 0x38: {                                         /* only pshufb is translated; the other 0F 38 instructions go through jfb_end */
+            if (!(g_jopt & JOPT_MISC) || *p != 0x00 || !p66 || pf3 || pf2) FB();
+            p++; jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
+            j->op = JO_PSHUFB; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break; }
         case 0xD7:
             if (!(p66 && !pf3 && !pf2)) FB();
             jmodrm(&p, j, &m, 0); if (m.ismem || lock) FB();

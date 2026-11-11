@@ -40,6 +40,14 @@ static void jh_step(CPU *c) {
  * cheap call (it reads only the flags: no register spill/fill, no instruction decode) instead of interpreting. */
 static u64 jh_cc(CPU *c, u64 cc) { return (u64) cond(c, (int) cc); }
 static u64 jh_cf(CPU *c) { return (u64)(RF(c) & CF_ ? 1 : 0); }
+/* exact flag updates for instructions whose flags the lazy model cannot express (bt: CF only, tzcnt/lzcnt: CF and ZF, popcnt: all six). The helper works on
+ * the flags in memory (RF() materialises pending lazy flags); each returns the 0/1 value that the host flags then cache, see LZ_CFX / LZ_ZFX */
+static u64 jh_btf(CPU *c, u64 bit) { u64 *f = &RF(c); *f = (*f & ~(u64) CF_) | (bit ? CF_ : 0); return bit ? 1 : 0; }
+static u64 jh_f2(CPU *c, u64 cf, u64 zf) { u64 *f = &RF(c); *f = (*f & ~(u64)(CF_ | ZF_)) | (cf ? CF_ : 0) | (zf ? ZF_ : 0); return zf ? 1 : 0; }
+static u64 jh_pcf(CPU *c, u64 cnt) { u64 *f = &RF(c); *f &= ~(u64)(CF_ | OF_ | AF_ | SF_ | PF_ | ZF_); if (!cnt) *f |= ZF_; return cnt ? 0 : 1; }
+/* JIT-only flag states: the flags in memory are already exact (nothing pending) and the host flags additionally cache one condition:
+ * LZ_CFX: host C = x86 CF (after bt), LZ_ZFX: host Z = x86 ZF (after tzcnt/lzcnt/popcnt). Both are set by "subs xzr, x0, #1" on the helper's 0/1 result. */
+enum { LZ_CFX = 64, LZ_ZFX };
 static void j_cc_helper(int cc) { a_mov(0, RCPU); a_movi(1, (u64) cc); j_callabs((void*) jh_cc); fl.nz = 0; fl.pend = 0; }   /* x0 = 0 or 1 */
 
 static void fl_spill(void) {
@@ -61,7 +69,9 @@ static int jmapcc(int x86cc, int *cc) {
     /* after comis*: CF = below or unordered, ZF = equal or unordered, PF = unordered, OF = SF = 0. fcmp leaves unordered V=1 N=0 Z=0 C=1, equal Z=1 C=1, less N=1,
      * greater C=1: below = lt, ae = ge, be = le, a = gt, p = vs, np = vc. e/ne/le/g also need the unordered case of ZF: not one A64 condition. */
     static const s8 fc_t[16] = { -2, -3, 11, 10, -1, -1, 13, 12, -2, -3, 6, 7, -2, -3, -1, -1 };
-    int v = fl.kind == LZ_FCMP ? fc_t[x86cc] : fl.kind == LZ_SUB ? sub_t[x86cc] : fl.kind == LZ_ADD ? add_t[x86cc] : fl.kind >= LZ_INC ? id_t[x86cc] : fl.kind >= LZ_SHL ? sh_t[x86cc] : log_t[x86cc];
+    static const s8 cfx_t[16] = { -1, -1, 2, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };   /* after bt: only b/ae come from the host flags (C) */
+    static const s8 zfx_t[16] = { -1, -1, -1, -1, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };   /* after tzcnt/lzcnt/popcnt: e/ne (Z) */
+    int v = fl.kind == LZ_CFX ? cfx_t[x86cc] : fl.kind == LZ_ZFX ? zfx_t[x86cc] : fl.kind == LZ_FCMP ? fc_t[x86cc] : fl.kind == LZ_SUB ? sub_t[x86cc] : fl.kind == LZ_ADD ? add_t[x86cc] : fl.kind >= LZ_INC ? id_t[x86cc] : fl.kind >= LZ_SHL ? sh_t[x86cc] : log_t[x86cc];
     if (v == -2) return 2;
     if (v == -3) return 1;
     if (v < 0) return -1;
@@ -244,7 +254,8 @@ static void j_cf_x8(void) {                           /* x8 = the x86 CF of the 
         else if (fl.kind == LZ_SUB) a_cset(8, 3);                  /* x86 CF is the borrow: lo */
         else if (fl.kind == LZ_LOGIC) a_movi(8, 0);
         else a_mov(8, 10);
-    } else { fl_flush(1); a_mov(0, RCPU); j_callabs((void*) jh_cf); a_mov(8, 0); }
+    } else if (fl.nz && fl.kind == LZ_CFX) a_cset(8, 2);           /* bt: host C is CF */
+    else { fl_flush(1); a_mov(0, RCPU); j_callabs((void*) jh_cf); a_mov(8, 0); }
 }
 
 static void j_adc(const JI *j) {                      /* adc / sbb, 32 or 64 bit. Flags stay lazy; the carry-in is recorded in lmeta (bit 16) */
@@ -424,6 +435,20 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
             jpatch19(z); fl.pend = 0; fl.nz = 0;         /* both paths: the flags are in memory */
             break;
         }
+        if (j->lva && sz < 4 && j->t >= 4 && j->cnt != 2 && j->imm >= 1 && (int) j->imm < sz * 8 && (g_jopt & JOPT_SHFL)) {   /* 8/16-bit shl/shr/sar by 1..bits-1, flags wanted: lazy as well (x9 = value, x10 = count, x11 = result, both zero-extended) */
+            fl_flush(j->lvb); fl.nz = 0;
+            if (j->at == OT_MEM) j_ea(j, &rb, &off);
+            j_opld(9, j, 0, sz, rb, off);
+            int n = (int) j->imm, bits = sz * 8, kind;
+            if (j->t == 5) { a_lsr(1, 11, 9, n); kind = LZ_SHR; }
+            else if (j->t == 7) { a_bfm(1, 1, 14, 9, 0, bits - 1); a_asr(1, 11, 14, n); a_andmask(11, 11, bits); kind = LZ_SAR; }
+            else { a_lsl(1, 11, 9, n); a_andmask(11, 11, bits); kind = LZ_SHL; }
+            a_movi(10, (u64) n);
+            a_lsl(1, 14, 11, 64 - bits); a_log(1, 3, 0, 31, 14, 14);    /* tst: host Z and N now describe the sz-bit result */
+            j_opst(11, j, sz, rb, off);
+            fl.kind = kind; fl.sz = sz; fl.nz = 1; fl.pend = 1;
+            break;
+        }
         if (j->lva && (!(g_jopt & JOPT_SHFL) || j->cnt == 2 || !j->imm || j->t < 4 || sz < 4)) { fl_flush(j->lvb); j_fb(j); break; }   /* flags wanted: interpreter */
         if (j->lva) {                                            /* shl/shr/sar by a non-zero immediate, flags wanted: keep them lazy (x9 = value, x10 = count, x11 = result) */
             fl_flush(j->lvb); fl.nz = 0;
@@ -548,15 +573,23 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
     case JO_BSWAP:
         g_ld(0, j->ar, sz, 0); a_rev(sf, 0, 0); g_st(0, j->ar, sz, 0); break;
     case JO_BSF: {
-        if (j->lva && j->sz2) { fl_flush(j->lvb); j_fb(j); break; }          /* tzcnt/lzcnt flags (CF, ZF of the result) are not modelled: interpreter */
         fl_flush(j->lvb); fl.nz = 0;                                         /* the compare below clobbers the host's flags; bsf defines ZF afresh */
         if (j->bt == OT_MEM) j_ea(j, &rb, &off);
         j_opld(0, j, 1, sz, rb, off);                                        /* x0 = source, zero-extended */
         if (j->t == 0) { a_rbit(sf, 2, 0); a_clz(sf, 2, 2); }                /* bsf / tzcnt: clz(rbit(x)), the operand width for 0 */
         else if (j->sz2) a_clz(sf, 2, 0);                                    /* lzcnt */
         else { a_clz(sf, 2, 0); a_movi(3, (u64)(sz * 8 - 1)); a_addsub(sf, 1, 0, 2, 3, 2); }   /* bsr: width - 1 - clz */
-        if (j->sz2) g_st(2, j->ar, sz, 0);
-        else {                                                               /* plain bsf/bsr leave the destination alone for a zero source */
+        if (j->sz2) {
+            g_st(2, j->ar, sz, 0);
+            if (j->lva) {                                                    /* tzcnt/lzcnt: CF = (source == 0), ZF = (result == 0); the rest is kept: exact update in memory, host Z caches ZF */
+                a_addsub(sf, 1, 1, 31, 0, 31); a_cset(1, 0);                 /* x1 = source == 0 */
+                a_addsub(sf, 1, 1, 31, 2, 31); a_cset(2, 0);                 /* x2 = result == 0 */
+                a_mov(0, RCPU); j_callabs((void*) jh_f2);
+                E(0xF1000400u | 0u << 5 | 31u);                              /* subs xzr, x0, #1: host Z = ZF */
+                fl.kind = LZ_ZFX; fl.sz = sz; fl.nz = 1; fl.pend = 0;
+            }
+            break;
+        } else {                                                               /* plain bsf/bsr leave the destination alone for a zero source */
             a_addsub(sf, 1, 1, 31, 0, 31);                                   /* cmp x0, #0 */
             g_ld(3, j->ar, 8, 0); a_csel(1, 0, 2, 3, 2); g_st(2, j->ar, 8, 0);
         }
@@ -660,6 +693,72 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
         jpatch26(done);
         fl.nz = 0;
         break; }
+    case JO_BT: {                                        /* bt/bts/btr/btc r/m, r|imm8. x0 = value, x1 = bit, x3 = the selected bit, x4 = its mask */
+        int bits = sz * 8, lg = sz == 2 ? 4 : sz == 4 ? 5 : 6, lgb = sz == 2 ? 1 : sz == 4 ? 2 : 3;
+        int memf = j->at == OT_MEM, imm = j->bt == OT_IMM, rmw = j->t != 0, nb = (int) j->imm & (bits - 1);
+        if (memf || j->lva) fl_flush(1);                 /* the flags other than CF are kept: memory must hold them exactly before anything can fault */
+        if (memf) {
+            j_ea(j, &rb, &off);
+            if (!imm) {                                  /* register bit offset: signed, it also selects the word: address += (off >> lg) * size */
+                if (sz == 8) g_ld(1, j->br, 8, j->rex); else g_ldx(1, j->br, sz, 1, 8, j->rex);
+                a_asr(1, 3, 1, lg); a_andmask(1, 1, lg);
+                if (off >= 0) a_addi(0, 14, rb, (u32) off, 0); else a_addi(1, 14, rb, (u32) -off, 0);
+                a_addsh(14, 14, 3, lgb); rb = 14; off = 0;
+            }
+            m_ld(sz, 0, 0, 0, rb, off);
+        } else g_ld(0, j->ar, sz, j->rex);
+        if (!imm && !memf) { g_ld(1, j->br, sz, j->rex); a_andmask(1, 1, lg); }
+        if (imm) a_bfm(1, 0, 3, 0, nb, nb);              /* ubfx x3, x0, #nb, #1 */
+        else { a_shv(1, 1, 3, 0, 1); a_andmask(3, 3, 1); }
+        if (rmw) {
+            if (imm) a_movi(4, 1ULL << nb); else { a_movi(4, 1); a_shv(1, 0, 4, 4, 1); }
+            if (j->t == 1) a_log(1, 1, 0, 2, 0, 4);      /* bts: orr */
+            else if (j->t == 2) a_log(1, 0, 1, 2, 0, 4); /* btr: bic */
+            else a_log(1, 2, 0, 2, 0, 4);                /* btc: eor */
+            if (memf) m_st(sz, 2, rb, off); else g_st(2, j->ar, sz, j->rex);     /* the store may fault: the flags are written after it */
+        }
+        if (j->lva) {
+            a_mov(1, 3); a_mov(0, RCPU); j_callabs((void*) jh_btf);
+            E(0xF1000400u | 0u << 5 | 31u);              /* subs xzr, x0, #1: host C = CF */
+            fl.kind = LZ_CFX; fl.sz = sz; fl.nz = 1; fl.pend = 0;
+        }
+        break; }
+    case JO_XRR:                                         /* xchg r, r */
+        g_ld(0, j->ar, sz, j->rex); g_ld(1, j->br, sz, j->rex); g_st(1, j->ar, sz, j->rex); g_st(0, j->br, sz, j->rex); break;
+    case JO_DF:                                          /* cld / std */
+        c_ld(0, OFF_RFL); a_movi(1, DF_);
+        if (j->t) a_log(1, 1, 0, 0, 0, 1); else a_log(1, 0, 1, 0, 0, 1);
+        c_st(0, OFF_RFL); break;
+    case JO_XLH:                                         /* movlps/movhps/movlpd/movhpd (64 bits to or from memory), movhlps, movlhps */
+        switch (j->t) {
+        case 0: case 1: fl_flush(j->lvb); j_ea(j, &rb, &off); m_ld(8, 0, 0, 0, rb, off); c_st(0, OFF_X(j->ar) + (j->t ? 8u : 0u)); break;
+        case 2: case 3: c_ld(0, OFF_X(j->br) + (j->t == 3 ? 8u : 0u)); fl_flush(j->lvb); j_ea(j, &rb, &off); m_st(8, 0, rb, off); break;
+        case 4: c_ld(0, OFF_X(j->br) + 8); c_st(0, OFF_X(j->ar)); break;
+        default: c_ld(0, OFF_X(j->br)); c_st(0, OFF_X(j->ar) + 8); break;
+        }
+        break;
+    case JO_POPCNT:                                      /* x0 = source, SWAR bit count (no NEON dependency) */
+        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); }
+        else fl_flush(j->lvb);
+        j_opld(0, j, 1, sz, rb, off);
+        a_lsr(1, 1, 0, 1); a_movi(2, 0x5555555555555555ULL); a_log(1, 0, 0, 1, 1, 2); a_addsub(1, 1, 0, 0, 0, 1);
+        a_movi(2, 0x3333333333333333ULL); a_log(1, 0, 0, 1, 0, 2); a_lsr(1, 3, 0, 2); a_log(1, 0, 0, 3, 3, 2); a_addsub(1, 0, 0, 0, 1, 3);
+        a_lsr(1, 1, 0, 4); a_addsub(1, 0, 0, 0, 0, 1); a_movi(2, 0x0F0F0F0F0F0F0F0FULL); a_log(1, 0, 0, 0, 0, 2);
+        a_movi(2, 0x0101010101010101ULL); a_mul(1, 0, 0, 2); a_lsr(1, 0, 0, 56);
+        g_st(0, j->ar, sz, j->rex);
+        if (j->lva) {                                    /* CF = OF = AF = SF = PF = 0, ZF = (source == 0) */
+            a_mov(1, 0); a_mov(0, RCPU); j_callabs((void*) jh_pcf);
+            E(0xF1000400u | 0u << 5 | 31u);              /* subs xzr, x0, #1: host Z = ZF */
+            fl.kind = LZ_ZFX; fl.sz = sz; fl.nz = 1; fl.pend = 0;
+        }
+        break;
+    case JO_PSHUFB:                                      /* pshufb xmm, xmm/m128: tbl with the index byte masked to bit 7 and bits 0-3 (an index >= 16 gives 0, like bit 7 on x86) */
+        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); q_ldm(1, rb, off); } else q_ldc(1, OFF_X(j->br));
+        q_ldc(0, OFF_X(j->ar));
+        E(0x4F04E5E2u);                                  /* movi v2.16b, #0x8f */
+        q_log(2, 1, 1, 2);                               /* and v1, v1, v2 */
+        E(0x4E010000u);                                  /* tbl v0.16b, {v0.16b}, v1.16b */
+        q_stc(0, OFF_X(j->ar)); break;
     case JO_JMP: fl_flush(j->lvb); jx_direct(j->ip, j->target); return 1;
     case JO_JCC: {
         int cc = 0, m = fl.nz ? jmapcc(j->t, &cc) : -1;

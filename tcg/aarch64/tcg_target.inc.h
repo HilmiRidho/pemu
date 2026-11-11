@@ -56,6 +56,7 @@ extern void pemu_embed_clear(void);
 
 #define OFF_R(n)   ((u32) offsetof(CPU, r) + 8u * (u32)(n))
 #define OFF_RIP    ((u32) offsetof(CPU, rip))
+#define OFF_RFL    ((u32) offsetof(CPU, rf))
 #define OFF_FS     ((u32) offsetof(CPU, fs))
 #define OFF_GS     ((u32) offsetof(CPU, gs))
 #define OFF_LA     ((u32) offsetof(CPU, la))
@@ -105,7 +106,8 @@ static int g_jstats;
 #define JOPT_INT  256u                  /* one-operand mul/imul (flags dead), bswap, 8/16-bit shl/shr/sar (flags dead) */
 #define JOPT_RCPC 1024u                 /* multi-threaded guests: aligned integer loads/stores use ldapur/stlur (FEAT_LRCPC2) instead of ldur + dmb / dmb + stur; unaligned ones keep the dmb pair */
 #define JOPT_ATOM 512u                  /* lock-prefixed add/sub/and/or/xor/inc/dec, cmpxchg, xadd, xchg (LL/SC loops), adc/sbb, push m64, xchg rax,r, movq xmm,xmm/m64, 8/16-bit rol/ror by immediate (flags dead) */
-static unsigned g_jopt = JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
+#define JOPT_MISC 2048u                 /* bt/bts/btr/btc, popcnt, tzcnt/lzcnt with live flags, 8/16-bit shl/shr/sar by immediate with live flags, xchg r,r, cld/std, movlps/movhps/movlpd/movhpd/movlhps/movhlps, pshufb */
+static unsigned g_jopt = JOPT_MISC | JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
 /* Register pinning: guest rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi (numbers 0..7) are kept in callee-saved host registers, so
  * they survive helper calls and chained block-to-block branches. The CPU struct is only written back when translated
  * code is left (jepi), around an interpreter fallback (j_pin_spill / j_pin_fill) and, after a fault, from the signal
