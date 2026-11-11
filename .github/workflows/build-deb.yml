@@ -24,6 +24,8 @@ jobs:
     container: debian:bookworm
     steps:
       - uses: actions/checkout@v4
+      - name: Make scripts executable
+        run: chmod +x build.sh packaging/build-deb.sh tests/*.sh
       - name: Install toolchain
         run: apt-get update && apt-get install -y --no-install-recommends build-essential dpkg-dev clang lld
       - name: Version
@@ -49,6 +51,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Make scripts executable
+        run: chmod +x build.sh packaging/build-deb.sh tests/*.sh
       - name: Version
         id: v
         run: |
