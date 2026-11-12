@@ -2,7 +2,7 @@
 /* ------------------------------------------------------------ decoder (static, no guest state) */
 enum { OT_NONE, OT_REG, OT_MEM, OT_IMM };
 enum { JO_FB, JO_FBT, JO_NOP, JO_MOV, JO_MOVX, JO_LEA, JO_PUSH, JO_POP, JO_ALU, JO_NOT, JO_NEG, JO_SHIFT, JO_IMUL,
-       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_BT, JO_XRR, JO_DF, JO_XLH, JO_POPCNT, JO_PSHUFB, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
+       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_BT, JO_XRR, JO_DF, JO_XLH, JO_POPCNT, JO_PSHUFB, JO_PTEST, JO_XABS, JO_PMOVX, JO_CVTTF2SI, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
 typedef struct {
     u64 ip, imm, target; s64 disp;
     u8 len, op, sz, sz2, t, fr, fw, at, bt, ar, br, rex, lva, lvb, scale, seg, sx, cnt, nost, incdec, mmx, lk;
@@ -104,6 +104,29 @@ static const u8 *jfb_end(const u8 *p, int p66, int rexw, int *neutral, int *term
     }
     default: return NULL;
     }
+}
+
+/* 66 0F 38 xx that map onto NEON. Fills j->op / t / sz (/ sz2) and returns 1, or returns 0 when the instruction stays with the interpreter.
+ * JO_XVEC: t, sz as q_v3 (3 umin, 4 umax, 5 smin, 6 smax, 2 cmeq, 7 cmgt, 13 mul; sz = lane size log2), t 16 = packus* (sz 0: bw, 1: dw).
+ * JO_XABS: sz = lane size log2.  JO_PMOVX: t 0 zero / 1 sign extension, sz2 = source and sz = destination element bytes.  JO_PTEST: flags only. */
+static int jsse38(JI *j, u8 o3, int ismem) {
+    static const struct { u8 o, t, sz; } mm[] = {                       /* pmins* pminu* pmaxs* pmaxu*, pcmpeqq, pcmpgtq, pmulld */
+        { 0x38, 5, 0 }, { 0x39, 5, 2 }, { 0x3A, 3, 1 }, { 0x3B, 3, 2 }, { 0x3C, 6, 0 }, { 0x3D, 6, 2 }, { 0x3E, 4, 1 }, { 0x3F, 4, 2 },
+        { 0x29, 2, 3 }, { 0x37, 7, 3 }, { 0x40, 13, 2 } };
+    if (o3 == 0x00) { j->op = JO_PSHUFB; return 1; }
+    if (!(g_jopt & JOPT_SSE4)) return 0;
+    for (unsigned i = 0; i < sizeof mm / sizeof mm[0]; i++)
+        if (mm[i].o == o3) { j->op = JO_XVEC; j->t = mm[i].t; j->sz = mm[i].sz; return 1; }
+    if (o3 == 0x2B) { j->op = JO_XVEC; j->t = 16; j->sz = 1; return 1; }                      /* packusdw */
+    if (o3 >= 0x1C && o3 <= 0x1E) { j->op = JO_XABS; j->sz = (u8)(o3 - 0x1C); return 1; }    /* pabsb/w/d */
+    if (o3 == 0x17) { j->op = JO_PTEST; j->fw = 1; return 1; }                                /* ptest: writes all six flags, reads none */
+    if ((o3 >= 0x20 && o3 <= 0x25) || (o3 >= 0x30 && o3 <= 0x35)) {                          /* pmovsx* / pmovzx*: bw bd bq wd wq dq */
+        static const u8 es[6] = { 1, 1, 1, 2, 2, 4 }, ds[6] = { 2, 4, 8, 4, 8, 8 };
+        int k = o3 & 15;
+        if (ismem && es[k] * (16 / ds[k]) == 2) return 0;                                      /* pmov?xbq m16: no 2-byte vector load here */
+        j->op = JO_PMOVX; j->t = o3 < 0x30; j->sz2 = es[k]; j->sz = ds[k]; return 1;
+    }
+    return 0;
 }
 
 /* Decode one instruction. Returns 0 if its length is unknown (the translator ends the block before it). */
@@ -311,6 +334,10 @@ static int jdecode(JI *j, u64 ip) {
             if (!(g_jopt & JOPT_FP) || pf2 == pf3) FB();
             jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
             j->op = JO_CVTSI2F; j->sz2 = pf2 ? 8 : 4; j->sz = w ? 8 : 4; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;
+        case 0x2C:                                           /* cvttss2si / cvttsd2si r32|r64, xmm/m32|m64 (the helper is the interpreter's cvt_i: NaN and out of range give the "integer indefinite") */
+            if (!(g_jopt & JOPT_ARITH) || pf2 == pf3) FB();
+            jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
+            j->op = JO_CVTTF2SI; j->sz2 = pf2 ? 8 : 4; j->sz = w ? 8 : 4; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;
         case 0x2E: case 0x2F:                                /* ucomiss/ucomisd/comiss/comisd */
             if (!(g_jopt & JOPT_FCMP) || pf3 || pf2) FB();
             jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
@@ -405,10 +432,10 @@ static int jdecode(JI *j, u64 ip) {
                 j->at = OT_REG; j->ar = (u8) m.reg; j->bt = OT_REG; j->br = (u8) m.rm;
             }
             break; }
-        case 0x38: {                                         /* only pshufb is translated; the other 0F 38 instructions go through jfb_end */
-            if (!(g_jopt & JOPT_MISC) || *p != 0x00 || !p66 || pf3 || pf2) FB();
-            p++; jmodrm(&p, j, &m, 0); if (BADM(m)) FB();
-            j->op = JO_PSHUFB; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break; }
+        case 0x38: {                                         /* pshufb and the SSE4 integer ops of jsse38; the other 0F 38 instructions go through jfb_end */
+            if (!(g_jopt & JOPT_MISC) || !p66 || pf3 || pf2) FB();
+            u8 o3 = *p++; jmodrm(&p, j, &m, 0); if (BADM(m) || !jsse38(j, o3, m.ismem)) FB();
+            j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break; }
         case 0xD7:
             if (!(p66 && !pf3 && !pf2)) FB();
             jmodrm(&p, j, &m, 0); if (m.ismem || lock) FB();

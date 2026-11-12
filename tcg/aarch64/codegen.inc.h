@@ -8,6 +8,13 @@ static int jfb_idx(const u8 *q) {                               /* statistics: o
 }
 /* statistics key: bits 0-8 opcode (0x100 + x for 0F xx), bit 9 66h, bit 10 lock, bit 11 67h, bit 12 REX.W, bits 13-15 modrm.reg and
  * bit 16 "memory operand" (both only for the opcodes whose modrm.reg selects the operation), bit 17 "has modrm.reg" */
+static int jfb_idx3(const u8 *q) {                              /* statistics: third opcode byte of 0F 38 xx (xx) and 0F 3A xx (0x100 + xx); -1 for any other instruction */
+    while (*q == 0x66 || *q == 0xF3 || *q == 0xF2 || *q == 0x64 || *q == 0x65 || *q == 0x67 || *q == 0xF0 || (*q & 0xE7) == 0x26) q++;
+    if ((*q & 0xF0) == 0x40) q++;
+    if (q[0] != 0x0F || (q[1] != 0x38 && q[1] != 0x3A)) return -1;
+    return (q[1] == 0x3A ? 256 : 0) + q[2];
+}
+#define JST3(arr, q) do { int k3_ = jfb_idx3((const u8*) (q)); if (k3_ >= 0) (arr)[k3_]++; } while (0)
 static unsigned jfb_key(const u8 *q) {
     unsigned p66 = 0, lk = 0, a32 = 0, w = 0, ext = 0, mem = 0, hm = 0;
     for (;; q++) {
@@ -32,7 +39,7 @@ static void jfb_keyname(unsigned k, char *out) {
              (k >> 12) & 1 ? "w " : "", idx >= 256 ? "0f " : "", idx & 255, ext);
 }
 static void jh_step(CPU *c) {
-    if (__builtin_expect(g_jstats, 0)) { jdyn[jfb_idx((const u8*) c->rip)]++; jdynv[jfb_key((const u8*) c->rip)]++; jst_dyn++; }
+    if (__builtin_expect(g_jstats, 0)) { jdyn[jfb_idx((const u8*) c->rip)]++; jdynv[jfb_key((const u8*) c->rip)]++; JST3(jdyn3, c->rip); jst_dyn++; }
     step(c);
 }
 
@@ -45,6 +52,12 @@ static u64 jh_cf(CPU *c) { return (u64)(RF(c) & CF_ ? 1 : 0); }
 static u64 jh_btf(CPU *c, u64 bit) { u64 *f = &RF(c); *f = (*f & ~(u64) CF_) | (bit ? CF_ : 0); return bit ? 1 : 0; }
 static u64 jh_f2(CPU *c, u64 cf, u64 zf) { u64 *f = &RF(c); *f = (*f & ~(u64)(CF_ | ZF_)) | (cf ? CF_ : 0) | (zf ? ZF_ : 0); return zf ? 1 : 0; }
 static u64 jh_pcf(CPU *c, u64 cnt) { u64 *f = &RF(c); *f &= ~(u64)(CF_ | OF_ | AF_ | SF_ | PF_ | ZF_); if (!cnt) *f |= ZF_; return cnt ? 0 : 1; }
+static u64 jh_ptf(CPU *c, u64 zf, u64 cf) { u64 *f = &RF(c); *f &= ~(u64)(CF_ | OF_ | AF_ | SF_ | PF_ | ZF_); if (zf) *f |= ZF_; if (cf) *f |= CF_; return cf ? 1 : 0; }   /* ptest: OF = SF = AF = PF = 0; returns CF for the host flags (LZ_CFX) */
+static u64 jh_cof(CPU *c, u64 cf, u64 of) { u64 *f = &RF(c); *f &= ~(u64)(CF_ | OF_); if (cf) *f |= CF_; if (of) *f |= OF_; return cf ? 1 : 0; }   /* imul, rol, ror: only CF and OF change; returns CF for the host flags (LZ_CFX) */
+static u64 jh_cvttf(u64 bits, u64 fl) {                          /* cvttss2si / cvttsd2si: fl bit 0 = source is a double, bit 1 = 64-bit result */
+    double v; if (fl & 1) memcpy(&v, &bits, 8); else { u32 u = (u32) bits; float f; memcpy(&f, &u, 4); v = f; }
+    return cvt_i(v, (fl & 2) ? 8 : 4, 1);
+}
 /* JIT-only flag states: the flags in memory are already exact (nothing pending) and the host flags additionally cache one condition:
  * LZ_CFX: host C = x86 CF (after bt), LZ_ZFX: host Z = x86 ZF (after tzcnt/lzcnt/popcnt). Both are set by "subs xzr, x0, #1" on the helper's 0/1 result. */
 enum { LZ_CFX = 64, LZ_ZFX };
@@ -449,6 +462,21 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
             fl.kind = kind; fl.sz = sz; fl.nz = 1; fl.pend = 1;
             break;
         }
+        if (j->lva && j->t < 2 && sz >= 4 && j->cnt != 2 && j->imm && (g_jopt & JOPT_ARITH)) {      /* rol/ror r/m32|64 by imm8 (1..bits-1) or by 1 (D1), flags wanted: CF and OF from the result, the other flags stay */
+            int bits = sz * 8, n = (int) j->imm;
+            fl_flush(1); fl.nz = 0;
+            if (j->at == OT_MEM) j_ea(j, &rb, &off);
+            j_opld(0, j, 0, sz, rb, off);
+            a_movi(1, (u64)(j->t == 1 ? n : bits - n)); a_shv(sf, 3, 0, 0, 1);       /* rol by n = ror by bits - n */
+            j_opst(0, j, sz, rb, off);                   /* the store may fault: the flags are written after it */
+            if (j->t == 0) { a_andmask(1, 0, 1); a_lsr(sf, 2, 0, bits - 1); }          /* rol: CF = bit 0, OF = msb ^ CF */
+            else { a_lsr(sf, 1, 0, bits - 1); a_lsr(sf, 2, 0, bits - 2); a_andmask(2, 2, 1); }   /* ror: CF = msb, OF = CF ^ the bit below it */
+            a_log(1, 2, 0, 2, 1, 2);                     /* x2 = OF */
+            a_mov(0, RCPU); j_callabs((void*) jh_cof);
+            E(0xF1000400u | 0u << 5 | 31u);              /* subs xzr, x0, #1: host C = CF */
+            fl.kind = LZ_CFX; fl.sz = sz; fl.nz = 1; fl.pend = 0;
+            break;
+        }
         if (j->lva && (!(g_jopt & JOPT_SHFL) || j->cnt == 2 || !j->imm || j->t < 4 || sz < 4)) { fl_flush(j->lvb); j_fb(j); break; }   /* flags wanted: interpreter */
         if (j->lva) {                                            /* shl/shr/sar by a non-zero immediate, flags wanted: keep them lazy (x9 = value, x10 = count, x11 = result) */
             fl_flush(j->lvb); fl.nz = 0;
@@ -490,6 +518,19 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
         }
         j_opst(0, j, sz, rb, off); break; }
     case JO_IMUL: {
+        if (j->lva && (g_jopt & JOPT_ARITH)) {           /* flags wanted: CF = OF = signed overflow of the truncated product, the other flags stay (see the interpreter) */
+            fl_flush(1); fl.nz = 0;
+            if (j->bt == OT_MEM) j_ea(j, &rb, &off);
+            j_opld(0, j, 1, sz, rb, off);
+            if (j->sx) a_movi(1, j->imm); else g_ld(1, j->ar, sz, 0);
+            if (sf) { a_mulh(1, 2, 0, 1); a_mul(1, 0, 0, 1); a_asr(1, 3, 0, 63); a_addsub(1, 1, 1, 31, 2, 3); a_cset(6, 1); }      /* overflow: smulh != sign of the low half */
+            else { a_sxtw(2, 0); a_sxtw(3, 1); a_mul(1, 4, 2, 3); a_sxtw(5, 4); a_addsub(1, 1, 1, 31, 4, 5); a_cset(6, 1); a_movw(0, 4); }
+            g_st(0, j->ar, sz, 0);                       /* the flags are written after the last access that can fault */
+            a_mov(1, 6); a_mov(2, 6); a_mov(0, RCPU); j_callabs((void*) jh_cof);      /* CF = OF = overflow */
+            E(0xF1000400u | 0u << 5 | 31u);              /* subs xzr, x0, #1: host C = CF */
+            fl.kind = LZ_CFX; fl.sz = sz; fl.nz = 1; fl.pend = 0;
+            break;
+        }
         if (j->lva) { fl_flush(j->lvb); j_fb(j); break; }
         fl_flush(j->lvb); fl.nz = 0;
         if (j->bt == OT_MEM) j_ea(j, &rb, &off);
@@ -538,7 +579,7 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
     case JO_XVEC:
         if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); vm_ldm(j->mmx, 1, rb, off); } else vm_ldc(j->mmx, 1, j->br);
         vm_ldc(j->mmx, 0, j->ar);
-        if (j->t == 16) { E(0x2E212800u | 0u << 5 | 0u); E(0x6E212800u | 1u << 5 | 0u); }       /* packuswb: sqxtun v0.8b, v0.8h; sqxtun2 v0.16b, v1.8h */
+        if (j->t == 16) { E(0x2E212800u | (u32) j->sz << 22 | 0u << 5 | 0u); E(0x6E212800u | (u32) j->sz << 22 | 1u << 5 | 0u); }       /* packuswb / packusdw (sz 1): sqxtun v0.8b, v0.8h; sqxtun2 v0.16b, v1.8h (.4h/.8h from .4s) */
         else q_v3(j->t, j->sz, 0, 0, 1);
         vm_stc(j->mmx, 0, j->ar); break;
     case JO_MMSHUF:                                      /* pshufw: the four 16-bit lanes of the low 64 bits */
@@ -759,6 +800,46 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
         q_log(2, 1, 1, 2);                               /* and v1, v1, v2 */
         E(0x4E010000u);                                  /* tbl v0.16b, {v0.16b}, v1.16b */
         q_stc(0, OFF_X(j->ar)); break;
+    case JO_CVTTF2SI:                                    /* the flags are not touched; the helper call clobbers x9-x11 and the host flags, so they are flushed first (as for an interpreter fallback) */
+        fl_flush(j->lvb);
+        if (j->bt == OT_MEM) { j_ea(j, &rb, &off); f_ldm(j->sz2, 1, rb, off); } else f_ldc(j->sz2, 1, OFF_X(j->br));
+        f_tox(j->sz2, 0, 1);                             /* x0 = the raw bits (w0 for a float) */
+        a_movi(1, (u64)((j->sz2 == 8 ? 1 : 0) | (j->sz == 8 ? 2 : 0)));
+        j_callabs((void*) jh_cvttf);
+        fl.nz = 0;
+        g_st(0, j->ar, j->sz, 0); break;                 /* a 32-bit result is zero-extended by the helper */
+    case JO_XABS:                                        /* pabsb/w/d: smax(x, 0 - x). The most negative value maps to itself, like pabs; only encodings that q_v3/q_log already use */
+        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); q_ldm(1, rb, off); } else q_ldc(1, OFF_X(j->br));
+        q_log(0, 3, 3, 3);                               /* eor v3, v3, v3: zero */
+        q_v3(1, j->sz, 2, 3, 1);                         /* sub v2, v3, v1 */
+        q_v3(6, j->sz, 0, 1, 2);                         /* smax v0, v1, v2 */
+        q_stc(0, OFF_X(j->ar)); break;
+    case JO_PMOVX: {                                     /* pmovzx/pmovsx: each step interleaves (zip1) the low elements with zero (zx) or with their sign mask (sx), doubling the element size */
+        int nb = j->sz2 * (16 / j->sz);                  /* bytes the instruction reads from memory: 8 or 4 (2 is never translated, see jsse38) */
+        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); f_ldm(nb == 8 ? 8 : 4, 1, rb, off); } else q_ldc(1, OFF_X(j->br));
+        q_log(0, 3, 3, 3);                               /* eor v3, v3, v3: zero */
+        for (int w = j->sz2, src = 1; w < j->sz; w *= 2, src = 0) {
+            int lg = w == 1 ? 0 : w == 2 ? 1 : 2;
+            if (j->t) q_v3(7, lg, 2, 3, src);            /* cmgt v2, v3, src: all ones where the element is negative */
+            q_v3(14, lg, 0, src, j->t ? 2 : 3);          /* zip1 v0, src, v2|v3 */
+        }
+        q_stc(0, OFF_X(j->ar)); break; }
+    case JO_PTEST:                                       /* ptest xmm, xmm/m128: ZF = (dst & src) == 0, CF = (src & ~dst) == 0, OF = SF = AF = PF = 0. Nothing else is written */
+        fl_flush(j->lvb);
+        if (j->bt == OT_MEM) { j_ea(j, &rb, &off); q_ldm(1, rb, off); }          /* read even when the flags are dead: the access may fault */
+        else if (j->lva) q_ldc(1, OFF_X(j->br));
+        if (!j->lva) break;
+        q_ldc(0, OFF_X(j->ar));
+        q_log(2, 2, 0, 1);                               /* and v2, v0, v1 */
+        q_log(3, 3, 1, 0);                               /* bic v3, v1, v0 */
+        q_v3(15, 3, 4, 2, 2); q_log(1, 4, 4, 2); f_tox(8, 3, 4);                 /* x3 = v2.d[0] | v2.d[1]  (zip2 .2d brings the high half down) */
+        q_v3(15, 3, 5, 3, 3); q_log(1, 5, 5, 3); f_tox(8, 5, 5);                 /* x5 = v3.d[0] | v3.d[1] */
+        a_addsub(1, 1, 1, 31, 3, 31); a_cset(1, 0);      /* cmp x3, #0; cset w1, eq: ZF */
+        a_addsub(1, 1, 1, 31, 5, 31); a_cset(2, 0);      /* cmp x5, #0; cset w2, eq: CF */
+        a_mov(0, RCPU); j_callabs((void*) jh_ptf);
+        E(0xF1000400u | 0u << 5 | 31u);                  /* subs xzr, x0, #1: host C = CF */
+        fl.kind = LZ_CFX; fl.sz = 4; fl.nz = 1; fl.pend = 0;
+        break;
     case JO_JMP: fl_flush(j->lvb); jx_direct(j->ip, j->target); return 1;
     case JO_JCC: {
         int cc = 0, m = fl.nz ? jmapcc(j->t, &cc) : -1;

@@ -106,8 +106,10 @@ static int g_jstats;
 #define JOPT_INT  256u                  /* one-operand mul/imul (flags dead), bswap, 8/16-bit shl/shr/sar (flags dead) */
 #define JOPT_RCPC 1024u                 /* multi-threaded guests: aligned integer loads/stores use ldapur/stlur (FEAT_LRCPC2) instead of ldur + dmb / dmb + stur; unaligned ones keep the dmb pair */
 #define JOPT_ATOM 512u                  /* lock-prefixed add/sub/and/or/xor/inc/dec, cmpxchg, xadd, xchg (LL/SC loops), adc/sbb, push m64, xchg rax,r, movq xmm,xmm/m64, 8/16-bit rol/ror by immediate (flags dead) */
+#define JOPT_ARITH 8192u                /* imul r, r/m[, imm] and rol/ror r/m32|64 by imm8 or 1 with the flags wanted (native result, CF/OF written by a helper), cvttss2si/cvttsd2si (helper call) */
+#define JOPT_SSE4 4096u                 /* 66 0F 38 xx: pmin/pmax{s,u}{b,w,d}, pcmpeqq, pcmpgtq, pmulld, packusdw, pabs{b,w,d}, pmovsx/pmovzx, ptest as NEON instead of the interpreter */
 #define JOPT_MISC 2048u                 /* bt/bts/btr/btc, popcnt, tzcnt/lzcnt with live flags, 8/16-bit shl/shr/sar by immediate with live flags, xchg r,r, cld/std, movlps/movhps/movlpd/movhpd/movlhps/movhlps, pshufb */
-static unsigned g_jopt = JOPT_MISC | JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
+static unsigned g_jopt = JOPT_MISC | JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC | JOPT_SSE4 | JOPT_ARITH;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
 /* Register pinning: guest rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi (numbers 0..7) are kept in callee-saved host registers, so
  * they survive helper calls and chained block-to-block branches. The CPU struct is only written back when translated
  * code is left (jepi), around an interpreter fallback (j_pin_spill / j_pin_fill) and, after a fault, from the signal
@@ -118,5 +120,6 @@ static inline int pin(int n) { return (g_jpin && n >= 0 && n < 8) ? jpin_reg[n] 
 static unsigned long long jdyn[512], jst_dyn;
 static unsigned long long jdynv[1 << 18];                         /* statistics: the same, by variant (see jfb_key) */
 static unsigned jfbv[1 << 18];                     /* statistics: interpreter fallbacks EXECUTED, by opcode (jfbh below counts translated sites) */
+static unsigned long long jdyn3[512]; static unsigned jfb3[512];  /* statistics: third opcode byte of 0F 38 xx (0..255) and 0F 3A xx (256..511): executed fallbacks / translated sites */
 static unsigned jfbh[512], jst_fb;                               /* statistics: interpreter fallbacks by opcode (0x100 + x for 0F xx) */
 

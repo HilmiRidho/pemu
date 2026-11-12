@@ -49,7 +49,7 @@ static void jtranslate(u64 pc) {                          /* the caller is not a
     if (g_jstats)
         for (int i = 0; i < n; i++)
             if (ji[i].op == JO_FB || ji[i].op == JO_FBT) {
-                jfbh[jfb_idx((const u8*) ji[i].ip)]++; jfbv[jfb_key((const u8*) ji[i].ip)]++; jst_fb++;
+                jfbh[jfb_idx((const u8*) ji[i].ip)]++; jfbv[jfb_key((const u8*) ji[i].ip)]++; JST3(jfb3, ji[i].ip); jst_fb++;
             }
     for (int i = 0; i < n; i++) {                                 /* pages that now hold translated code */
         jpg_add(ji[i].ip >> 12);
@@ -128,7 +128,7 @@ static void jit_dispatch(CPU *c) {
         u64 pc = c->rip;
         if (c->patch == 1) {                                  /* the block ended with an instruction the translator does not handle: interpret it here */
             c->patch = 0;
-            if (__builtin_expect(g_jstats, 0)) { jdyn[jfb_idx((const u8*) pc)]++; jdynv[jfb_key((const u8*) pc)]++; jst_dyn++; }
+            if (__builtin_expect(g_jstats, 0)) { jdyn[jfb_idx((const u8*) pc)]++; jdynv[jfb_key((const u8*) pc)]++; JST3(jdyn3, pc); jst_dyn++; }
             step(c); return;
         }
         jreg_enter(t, c);
@@ -225,6 +225,19 @@ static void jit_report(void) {
         char nm[40]; jfb_keyname((unsigned) b, nm); fprintf(stderr, " [%s] x%u", nm, jfbv[b]); jfbv[b] = 0;
     }
     fprintf(stderr, "\n");
+    for (int pass = 0; pass < 2; pass++) {                       /* 0F 38 / 0F 3A: the third opcode byte, which the variant lines above cannot show */
+        int any = 0; for (int i = 0; i < 512; i++) if (pass ? jdyn3[i] : jfb3[i]) any = 1;
+        if (!any) continue;
+        fprintf(stderr, "pemu jit: 0f 38 / 0f 3a third opcode byte, %s:", pass ? "executed fallbacks (count)" : "translated sites");
+        for (int k = 0; k < 12; k++) {
+            int b = -1;
+            for (int i = 0; i < 512; i++) if ((pass ? jdyn3[i] : jfb3[i]) && (b < 0 || (pass ? jdyn3[i] > jdyn3[b] : jfb3[i] > jfb3[b]))) b = i;
+            if (b < 0) break;
+            fprintf(stderr, " %s/%02x x%llu", b >= 256 ? "3a" : "38", b & 255, pass ? jdyn3[b] : (unsigned long long) jfb3[b]);
+            if (pass) jdyn3[b] = 0; else jfb3[b] = 0;
+        }
+        fprintf(stderr, "\n");
+    }
     fprintf(stderr, "pemu jit: executed fallback variants:");
     for (int k = 0; k < 12; k++) {
         int b = -1; for (int i = 0; i < (1 << 18); i++) if (jdynv[i] && (b < 0 || jdynv[i] > jdynv[b])) b = i;
