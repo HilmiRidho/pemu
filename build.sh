@@ -52,4 +52,5 @@ if [ -z "$SKIP_TESTS" ]; then
   tests/ns.sh "$OUT"          # namespace calls / name_to_handle_at must not escape the rootfs view (x86_64 host, plain gcc)
   tests/sock.sh "$OUT"        # AF_UNIX: ELOOP must not reach the host, absolute final symlinks, recvmmsg names (x86_64 host, gcc + python3)
   tests/owner.sh "$OUT"       # fake owners: chown by a fake root is remembered in an xattr and shown by stat (x86_64 host, gcc + python3)
+  tests/jit_embed.sh "$OUT"   # 66 0F 38, imul, rol/ror, cvtt*2si: native vs interpreter vs the AArch64 JIT run by the embedded interpreter (x86_64 host, plain gcc + static libc)
 fi
