@@ -156,11 +156,11 @@ static int simd_insn(CPU*c, u32 i) {
         }
         memcpy(d, t, 16); return 0;
     }
-    if ((i & 0x9F800400) == 0x0F000400 && ((i >> 19) & 15) && (((i >> 11) & 31) == 0 || ((i >> 11) & 31) == 10)) {   /* USHR / SSHR / SHL (vector, immediate) */
+    if ((i & 0x9F800400) == 0x0F000400 && ((i >> 19) & 15) && (((i >> 11) & 31) == 0 || ((i >> 11) & 31) == 2 || ((i >> 11) & 31) == 10)) {   /* USHR / SSHR / USRA / SSRA / SHL (vector, immediate) */
         int u = (i >> 29) & 1, immh = (i >> 19) & 15, sh = (i >> 16) & 127, op = (i >> 11) & 31;
         int sz = 31 - __builtin_clz((unsigned) immh), esz = 1 << sz, bits = esz * 8;
         if (sz == 3 && !q) return -1;
-        if (op == 0 || op == 10) {
+        if (op == 0 || op == 2 || op == 10) {
             int n = op == 10 ? sh - bits : 2 * bits - sh;
             u8 *d = (u8*) c->v[rd], *nn = (u8*) c->v[rn], t[16] = {0};
             for (int k = 0; k < (q ? 16 : 8) / esz; k++) {
@@ -168,10 +168,19 @@ static int simd_insn(CPU*c, u32 i) {
                 if (op == 10) r = a << n;
                 else if (u) r = a >> n;
                 else r = (u64)(((s64)(a << (64 - bits))) >> (64 - bits) >> n);
+                if (op == 2) { u64 acc = 0; memcpy(&acc, d + k * esz, (size_t) esz); r += acc; }                /* USRA / SSRA: accumulate into the destination */
                 memcpy(t + k * esz, &r, (size_t) esz);
             }
             memcpy(d, t, 16); return 0;
         }
+    }
+    if ((i & 0xBFE08400) == 0x2E000000) {                      /* EXT: bytes imm4 .. of the concatenation Vm:Vn (Vn is the low part) */
+        int imm4 = (i >> 11) & 15, nb = q ? 16 : 8;
+        if (imm4 >= nb) return -1;
+        u8 cat[32], t[16] = {0};
+        memcpy(cat, c->v[rn], (size_t) nb); memcpy(cat + nb, c->v[rm], (size_t) nb);
+        memcpy(t, cat + imm4, (size_t) nb);
+        memcpy(c->v[rd], t, 16); return 0;
     }
     if ((i & 0xBF3FFC00) == 0x2E212800) {                      /* SQXTUN / SQXTUN2: signed lanes narrowed to unsigned half-width with saturation */
         int sz = (i >> 22) & 3; if (sz == 3) return -1;
