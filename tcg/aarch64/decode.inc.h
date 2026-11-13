@@ -181,7 +181,7 @@ static int jdecode(JI *j, u64 ip) {
     case 0x69: case 0x6B:
         if (opsz == 2) FB();
         jmodrm(&p, j, &m, op == 0x69 ? 4 : 1); if (BADM(m)) FB();
-        j->op = JO_IMUL; j->sz = (u8) opsz; j->sx = 1; j->fr = 1; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1);
+        j->op = JO_IMUL; j->sz = (u8) opsz; j->sx = 1; j->at = OT_REG;      /* imul writes CF/OF only: the other flags pass through (live before = live after) */ j->ar = (u8) m.reg; SETRM(m, 1);
         if (op == 0x69) { j->imm = (u64)(s64) rd32s(p); p += 4; } else j->imm = (u64)(s64)(s8) *p++;
         break;
     case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
@@ -241,7 +241,12 @@ static int jdecode(JI *j, u64 ip) {
         j->cnt = op <= 0xC1 ? 0 : op <= 0xD1 ? 1 : 2;
         if (j->cnt == 0) j->imm = (u8) *p++ & (sz == 8 ? 63 : 31); else if (j->cnt == 1) j->imm = 1;
         int nat8 = sz < 4 && t >= 4 && j->cnt != 2 && j->imm >= 1 && (int) j->imm < sz * 8 && (g_jopt & JOPT_SHFL);   /* 8/16-bit shl/shr/sar by 1..bits-1 keep their flags lazy too */
-        if (j->cnt == 2 || !j->imm || t < 2 || (sz < 4 && !nat8)) j->fr = 1; else j->fw = 1;      /* otherwise 8/16-bit: fr, so the interpreter fallback sees the merged flags */
+        if (j->cnt == 2 || !j->imm || t < 2 || (sz < 4 && !nat8)) {
+            /* rol/ror, a count in cl, a zero count: the flags are only partly written or not at all, so the old flags pass through. Neither fr nor fw:
+             * they are live before the instruction exactly when they are live after it (as inc/dec). With a memory operand fr is kept, so that the
+             * flags are in memory before an access that can fault. The interpreter fallback sees the merged flags because they are live then. */
+            if (j->at == OT_MEM) j->fr = 1;
+        } else j->fw = 1;
         break; }
     case 0xC2: j->op = JO_RET; j->imm = (u16)(*p | p[1] << 8); p += 2; break;
     case 0xC3: j->op = JO_RET; break;
@@ -300,7 +305,7 @@ static int jdecode(JI *j, u64 ip) {
             j->op = JO_SETCC; j->t = o2 & 15; j->sz = 1; j->fr = 1; SETRM(m, 0); break;
         case 0xAF:
             jmodrm(&p, j, &m, 0); if (BADM(m) || opsz == 2) FB();
-            j->op = JO_IMUL; j->sz = (u8) opsz; j->fr = 1; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;
+            j->op = JO_IMUL; j->sz = (u8) opsz; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;      /* flags pass through, see 69/6B */
         case 0xB6: case 0xB7: case 0xBE: case 0xBF:
             jmodrm(&p, j, &m, 0); if (BADM(m)) FB();                            /* opsz 2 (66 0f b6/be): the 16-bit merge is done by g_st */
             j->op = JO_MOVX; j->sz = (u8) opsz; j->sz2 = (o2 & 1) ? 2 : 1; j->sx = o2 >= 0xBE; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break;

@@ -189,9 +189,10 @@ static void jx_ret(void) {                              /* guest return address 
     jpatch19(s1); jpatch19(s2);
     jx_indirect();
 }
-static void jrsb_push(u64 retaddr, u32 **adrsite) {    /* uses x2-x5; *adrsite = adr of the host continuation, patched by the caller */
+static void jrsb_push(u64 retaddr, u32 **adrsite, int x0_has_ret) {    /* uses x2-x5; *adrsite = adr of the host continuation, patched by the caller; x0_has_ret: x0 already holds retaddr */
     c_ld(2, OFF_RSBI); a_addsh(3, RCPU, 2, 4);
-    a_movi(4, retaddr); *adrsite = jcur; E(0);
+    if (x0_has_ret) a_mov(4, 0); else a_movi(4, retaddr);
+    *adrsite = jcur; E(0);
     a_stp(4, 5, 3, OFF_RSB);
     a_addi(0, 2, 2, 1, 0); a_andmask(2, 2, 6); c_st(2, OFF_RSBI);
 }
@@ -335,6 +336,45 @@ static void j_atomic(const JI *j, int mode) {
     }
 }
 
+
+/* Host register that already holds guest operand `which` (0: a, 1: b) of j as the full guest register, or -1 (not a register, not pinned,
+ * or ah/ch/dh/bh). For a 4 or 8 byte operation it can be used directly: a 32-bit A64 op writes a zero-extended result, as x86 does. */
+static int j_preg(const JI *j, int which, int sz) {
+    int ot = which ? j->bt : j->at, r = which ? j->br : j->ar;
+    if (ot != OT_REG) return -1;
+    if (sz == 1 && !j->rex && r >= 4 && r < 8) return -1;
+    return pin(r);
+}
+static void a_addi32(int sub, int rd, int rn, u32 imm12) { E(0x11000000u | (sub ? 0x40000000u : 0) | (imm12 & 0xfff) << 10 | (u32) rn << 5 | (u32) rd); }   /* w-form add/sub immediate */
+/* flags dead, destination a pinned register, 4/8 bytes: op the register directly (no x9/x10/x11 copies). Returns 1 when done. */
+static int j_alu_fast(const JI *j, int sz, int sf, int hm) {
+    int dp = j_preg(j, 0, sz);
+    if (dp < 0 || sz < 4 || j->lk || j->t == 2 || j->t == 3) return 0;
+    if (j->at != OT_REG) return 0;
+    if (j->nost) return j->bt != OT_MEM;                      /* cmp / test with dead flags and no memory operand: nothing to do */
+    int sp = -1, rb = 0, off = 0;
+    if (j->bt == OT_REG) { sp = j_preg(j, 1, sz); if (sp < 0) { g_ld(10, j->br, sz, j->rex); sp = 10; } }
+    else if (j->bt == OT_MEM) { j_ea(j, &rb, &off); m_ld(sz, 0, 0, 10, rb, off); sp = 10; }
+    else {
+        s64 v = sz == 8 ? (s64) j->imm : (s64)(s32)(u32) j->imm;
+        if ((j->t == 0 || j->t == 5) && v > -4096 && v < 4096) {
+            int sub = (j->t == 5) != (v < 0); u32 m = (u32)(v < 0 ? -v : v);
+            if (sf) a_addi(sub, dp, dp, m, 0); else a_addi32(sub, dp, dp, m);
+            return 1;
+        }
+        a_movi(10, j->imm & szmask(sz)); sp = 10;
+    }
+    switch (j->t) {
+    case 0: a_addsub(sf, 0, 0, dp, dp, sp); break;
+    case 1: a_log(sf, 1, 0, dp, dp, sp); break;
+    case 4: a_log(sf, 0, 0, dp, dp, sp); break;
+    case 6: a_log(sf, 2, 0, dp, dp, sp); break;
+    default: a_addsub(sf, 1, 0, dp, dp, sp); break;           /* sub */
+    }
+    (void) hm;
+    return 1;
+}
+
 static int jemit(const JI *j) {          /* returns 1 when it ended the block (the exit is emitted) */
     int sz = j->sz, rb = 0, off = 0, hm = j->at == OT_MEM || j->bt == OT_MEM, sf = sz == 8;
     switch (j->op) {
@@ -350,20 +390,36 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
     case JO_FB: fl_flush(j->lvb); j_fb(j); break;
     case JO_FBT:                                         /* not translated, ends the block: the dispatcher interprets it (outside the cache, so a blocking system call never holds up a flush) */
         fl_flush(1); a_movi(0, j->ip); c_st(0, OFF_RIP); a_movi(0, 1); c_st(0, OFF_PATCH); a_b(jepi); return 1;
-    case JO_MOV:
+    case JO_MOV: {
+        int dp = j_preg(j, 0, sz), sp = j_preg(j, 1, sz);
+        if (!hm && dp >= 0 && sz >= 4) {                         /* register or immediate into a pinned register: one instruction */
+            if (j->bt == OT_IMM) { a_movi(dp, j->imm & szmask(sz)); break; }
+            if (sp >= 0) { if (sz == 8) { if (sp != dp) a_mov(dp, sp); } else a_movw(dp, sp); break; }
+        }
+        if (j->bt == OT_MEM && dp >= 0 && sz >= 4) {              /* load straight into the pinned register (a faulting load leaves it unchanged) */
+            fl_flush(j->lvb); j_ea(j, &rb, &off); m_ld(sz, 0, 0, dp, rb, off); break;
+        }
+        if (j->at == OT_MEM && sp >= 0) {                         /* store a pinned register without copying it */
+            fl_flush(j->lvb); j_ea(j, &rb, &off); m_st(sz, sp, rb, off); break;
+        }
         if (hm) { fl_flush(j->lvb); j_ea(j, &rb, &off); }
-        j_opld(0, j, 1, sz, rb, off); j_opst(0, j, sz, rb, off); break;
+        j_opld(0, j, 1, sz, rb, off); j_opst(0, j, sz, rb, off); break; }
     case JO_MOVX: {
-        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); m_ld(j->sz2, j->sx, j->sz == 8, 0, rb, off); }
-        else g_ldx(0, j->br, j->sz2, j->sx, j->sz, j->rex);
-        g_st(0, j->ar, j->sz, j->rex); break; }
+        int dp = sz >= 4 ? j_preg(j, 0, sz) : -1, t = dp >= 0 ? dp : 0;      /* a pinned destination is written directly */
+        if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); m_ld(j->sz2, j->sx, j->sz == 8, t, rb, off); }
+        else g_ldx(t, j->br, j->sz2, j->sx, j->sz, j->rex);
+        if (dp < 0) g_st(0, j->ar, j->sz, j->rex);
+        break; }
     case JO_LEA: {
+        int dp = j_preg(j, 0, j->sz), t = dp >= 0 ? dp : 0;
         j_ea(j, &rb, &off);
-        if (off >= 0) a_addi(0, 0, rb, (u32) off, 0); else a_addi(1, 0, rb, (u32) -off, 0);
-        if (j->sz == 4) a_movw(0, 0);
-        g_st(0, j->ar, j->sz, j->rex); break; }
+        if (!(off == 0 && rb == t && j->sz == 8)) { if (off >= 0) a_addi(0, t, rb, (u32) off, 0); else a_addi(1, t, rb, (u32) -off, 0); }
+        if (j->sz == 4) a_movw(t, t);
+        if (dp < 0) g_st(0, j->ar, j->sz, j->rex);
+        break; }
     case JO_PUSH:
         fl_flush(j->lvb);
+        if (j->at == OT_REG && j_preg(j, 0, 8) >= 0) { j_push(j_preg(j, 0, 8)); break; }      /* a pinned register is stored as it is */
         if (j->at == OT_REG) g_ld(0, j->ar, 8, 0);
         else if (j->at == OT_MEM) { j_ea(j, &rb, &off); m_ld(8, 0, 0, 0, rb, off); }      /* push m64: the address is computed before rsp moves */
         else a_movi(0, j->imm);
@@ -375,7 +431,10 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
     case JO_XMOVQ:                                       /* movq xmm, xmm/m64: the upper half becomes zero */
         if (j->bt == OT_MEM) { fl_flush(j->lvb); j_ea(j, &rb, &off); f_ldm(8, 0, rb, off); } else f_ldc(8, 0, OFF_X(j->br));
         q_stc(0, OFF_X(j->ar)); break;
-    case JO_POP: fl_flush(j->lvb); j_pop(0); g_st(0, j->ar, 8, 0); break;
+    case JO_POP:
+        fl_flush(j->lvb);
+        if (j->ar != RSP && j_preg(j, 0, 8) >= 0 && pin(RSP) >= 0) { j_pop(j_preg(j, 0, 8)); break; }       /* load straight into the pinned register */
+        j_pop(0); g_st(0, j->ar, 8, 0); break;
     case JO_LEAVE:
         fl_flush(j->lvb);
         if (pin(RBP) >= 0) { m_ld(8, 0, 0, 2, pin(RBP), 0); a_addi(0, pin(RSP), pin(RBP), 8, 0); a_mov(pin(RBP), 2); break; }
@@ -410,6 +469,7 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
             break;
         }
         fl_flush(j->lvb); fl.nz = 0;
+        if (!nf && j_alu_fast(j, sz, sf, hm)) break;
         if (hm) j_ea(j, &rb, &off);
         j_opld(9, j, 0, sz, rb, off); j_opld(10, j, 1, sz, rb, off);
         alu_core(j->t, sz, nf);
@@ -864,7 +924,7 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
         a_movi(0, j->imm); j_push(0);
         if (!j->cnt) { jx_direct(j->ip, j->target); return 1; }
         else {                                           /* bl callee; the code after it is the continuation, reached by the callee's ret */
-            u32 *adr; jrsb_push(j->imm, &adr);
+            u32 *adr; jrsb_push(j->imm, &adr, 1);
             u32 *tc = jfind_emit(j->target);
             if (tc) a_bl(tc); else { E(0x94000000u); jstub_add(JS_CALL, jcur - 1, NULL, j->ip, j->target); }
             a_adr_at(adr, 5, jcur);
@@ -888,7 +948,7 @@ static int jemit(const JI *j) {          /* returns 1 when it ended the block (t
         if (j->op == JO_CALLI) { a_movi(2, j->imm); j_push(2); }
         if (!j->cnt) { jx_indirect(); return 1; }
         {                                                /* indirect call: inline cache hit = blr, miss = leave through an out-of-line exit */
-            u32 *adr; jrsb_push(j->imm, &adr);
+            u32 *adr; jrsb_push(j->imm, &adr, 0);
             a_ldst_u(3, 1, 1, RPEND, 0);
             u32 *s1 = a_cbz_fwd(1, 1);
             a_logsh(2, 2, 0, 0, 1, 13); a_andmask(2, 2, JIC_BITS); a_addsh(2, RIC, 2, 4);
