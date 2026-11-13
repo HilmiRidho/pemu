@@ -1,4 +1,6 @@
 #!/bin/sh
+# fuse: cmp/test/sub/add/and + jcc over every condition, operand form and size, with the flags dead or live at the exits (tests/jit_fuse.c, 19200 cases);
+# vec: palignr, pmovmskb, the pxor zero idiom (tests/jit_vec.c).
 # JIT tests for translations that have no AArch64 hardware in the loop: the 66 0F 38 instructions (tests/jit_sse4_*.c), imul / rol / ror with live flags (tests/jit_alu.c)
 # and cvttss2si / cvttsd2si (tests/jit_cvt.c).
 # Each guest is run natively, under the interpreter (-nojit) and under the AArch64 JIT, whose generated code is executed by the interpreter of pemu.c (-DPEMU_JIT_EMBED,
@@ -15,8 +17,8 @@ $CC -O2 -w -DPEMU_EMBED -Dmain=pemu_unused_main -c pemu.c -o "$T/a64.o"
 $CC -O2 -w -DPEMU_JIT_EMBED -c pemu_x64.c -o "$T/x64.o"
 $CC -o "$T/pemu_x64e" "$T/x64.o" "$T/a64.o" -lm -lpthread
 rc=0
-for g in sse4_reg sse4_mem alu cvt; do
-    case $g in sse4_*) f=tests/jit_$g.c; fl=-msse4.2 ;; *) f=tests/jit_$g.c; fl= ;; esac
+for g in sse4_reg sse4_mem alu cvt fuse vec; do
+    case $g in sse4_*|vec) f=tests/jit_$g.c; fl=-msse4.2 ;; *) f=tests/jit_$g.c; fl= ;; esac
     $CC -O1 $fl -static -o "$T/g_$g" "$f" -lm
     "$T/g_$g" | grep -v '^~' > "$T/native-$g"
     timeout 120 "$T/pemu_x64e" -nojit "$T/g_$g" > "$T/nojit-$g" 2>&1 || true
@@ -41,4 +43,6 @@ if ! grep -q 'interpreter fallbacks executed' "$T/stats-cvt"; then echo "jit_emb
 elif grep 'interpreter fallbacks executed' "$T/stats-cvt" | grep -E ' 0f 2c x' > /dev/null; then
     grep 'interpreter fallbacks executed' "$T/stats-cvt"; echo "jit_embed: cvttss2si / cvttsd2si still fall back: FAILED"; rc=1
 else echo "jit_embed: cvttss2si / cvttsd2si no longer fall back: ok"; fi
+if ! grep -q 'flag producers fused' "$T/stats-fuse" || grep -q ' 0 flag producers fused' "$T/stats-fuse"; then echo "jit_embed: no flag producer was fused in the fuse guest: FAILED"; rc=1; else echo "jit_embed: cmp/test/sub/add + jcc are fused: ok"; fi
+if grep 'interpreter fallbacks executed' "$T/stats-vec" | grep -E ' 0f 3a x' > /dev/null; then echo "jit_embed: palignr still falls back: FAILED"; rc=1; else echo "jit_embed: palignr no longer falls back: ok"; fi
 exit $rc
