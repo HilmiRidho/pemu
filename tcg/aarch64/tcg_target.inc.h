@@ -63,6 +63,7 @@ extern void pemu_embed_clear(void);
 #define OFF_LR     ((u32) offsetof(CPU, lr))
 #define OFF_LMETA  ((u32) offsetof(CPU, lmeta))
 #define OFF_PATCH  ((u32) offsetof(CPU, patch))
+_Static_assert(offsetof(CPU, lr) == offsetof(CPU, la) + 16 && offsetof(CPU, lmeta) == offsetof(CPU, lr) + 8, "fl_spill stores lr and lmeta with one stp");
 #define OFF_RSBI   ((u32) offsetof(CPU, rsbi))
 #define OFF_RSB    ((int) offsetof(CPU, rsb))      /* must stay below 512: ldp/stp immediate */
 
@@ -95,6 +96,7 @@ static int g_jmt;                                              /* the guest has 
 static u32 *jt_start; static u64 jt_pc;                        /* block being translated (visible to its own chained exits only) */
 static unsigned long long jst_blocks, jst_flush, jst_chain, jst_ins, jst_words;
 static int g_jstats;
+static unsigned long long jst_fused, jst_xdead;                  /* statistics: flag producers fused with their jcc / block exits that skip the flag spill */
 #define JOPT_SHFL 1u                    /* flags of shift-by-immediate kept lazy instead of running the interpreter */
 #define JOPT_FP   2u                    /* scalar SSE float: movss/movsd, add/sub/mul/div/sqrt ss/sd, cvtsi2ss/sd */
 #define JOPT_PIN  4u                    /* guest rax..rdi live in host registers while translated code runs */
@@ -107,9 +109,10 @@ static int g_jstats;
 #define JOPT_RCPC 1024u                 /* multi-threaded guests: aligned integer loads/stores use ldapur/stlur (FEAT_LRCPC2) instead of ldur + dmb / dmb + stur; unaligned ones keep the dmb pair */
 #define JOPT_ATOM 512u                  /* lock-prefixed add/sub/and/or/xor/inc/dec, cmpxchg, xadd, xchg (LL/SC loops), adc/sbb, push m64, xchg rax,r, movq xmm,xmm/m64, 8/16-bit rol/ror by immediate (flags dead) */
 #define JOPT_ARITH 8192u                /* imul r, r/m[, imm] and rol/ror r/m32|64 by imm8 or 1 with the flags wanted (native result, CF/OF written by a helper), cvttss2si/cvttsd2si (helper call) */
+#define JOPT_FUSE 16384u                /* cmp/test/add/sub whose flags only the next jcc reads: one flag-setting instruction on the pinned registers, no lazy flag state; flags dead at a block exit are not written */
 #define JOPT_SSE4 4096u                 /* 66 0F 38 xx: pmin/pmax{s,u}{b,w,d}, pcmpeqq, pcmpgtq, pmulld, packusdw, pabs{b,w,d}, pmovsx/pmovzx, ptest as NEON instead of the interpreter */
 #define JOPT_MISC 2048u                 /* bt/bts/btr/btc, popcnt, tzcnt/lzcnt with live flags, 8/16-bit shl/shr/sar by immediate with live flags, xchg r,r, cld/std, movlps/movhps/movlpd/movhpd/movlhps/movhlps, pshufb */
-static unsigned g_jopt = JOPT_MISC | JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC | JOPT_SSE4 | JOPT_ARITH;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
+static unsigned g_jopt = JOPT_MISC | JOPT_SHFL | JOPT_FP | JOPT_PIN | JOPT_SB | JOPT_RSB | JOPT_FCMP | JOPT_DIV | JOPT_CC | JOPT_INT | JOPT_ATOM | JOPT_RCPC | JOPT_SSE4 | JOPT_ARITH | JOPT_FUSE;   /* PEMU_JIT_OPT=<mask> overrides (0 = none): handy to bisect a misbehaving guest */
 /* Register pinning: guest rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi (numbers 0..7) are kept in callee-saved host registers, so
  * they survive helper calls and chained block-to-block branches. The CPU struct is only written back when translated
  * code is left (jepi), around an interpreter fallback (j_pin_spill / j_pin_fill) and, after a fault, from the signal

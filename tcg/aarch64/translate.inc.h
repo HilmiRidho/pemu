@@ -15,6 +15,29 @@ static void jit_flush_req(void) {
     pthread_mutex_unlock(&jmu);
 }
 
+/* Flags at a block exit. A block used to assume the flags live at every exit and so wrote the lazy flag state before each one. Looking at the code
+ * the exit leads to shows that they are usually dead: the first instruction that touches them overwrites them without reading them (the next cmp, test,
+ * add, ...). Returns 1 only when that is certain: instructions are decoded from pages this block has already read (so no new page is touched and the
+ * pages are in jpg, which flushes the cache when they change), and anything unknown, indirect or flag-reading counts as "live". */
+static int jflags_dead(u64 ip, const JI *ji, int n) {
+    for (int k = 0; k < 12; k++) {
+        if ((ip & 0xfff) > 4096 - 16) return 0;
+        int seen = 0;
+        for (int i = 0; i < n; i++) if ((ji[i].ip >> 12) == (ip >> 12)) { seen = 1; break; }
+        if (!seen) return 0;
+        JI t;
+        if (!jdecode(&t, ip)) return 0;
+        if (t.fr) return 0;
+        if (t.fw) return 1;
+        if (t.op == JO_JMP) { ip = t.target; continue; }
+        if (t.op >= JO_JMP || t.op == JO_FBT) return 0;
+        ip += t.len;
+    }
+    return 0;
+}
+/* Can the flags of an instruction of this kind be left in the host flags and be read by this jcc alone? (the same table jmapcc uses) */
+static int jmap_ok(int kind, int x86cc) { int sv = fl.kind, cc; fl.kind = kind; int m = jmapcc(x86cc, &cc); fl.kind = sv; return m == 0; }
+
 static void jtranslate(u64 pc) {                          /* the caller is not active; the block is found with jfind() afterwards */
     JI ji[JMAXI]; int n = 0; u64 ip = pc;
     int sb = !!(g_jopt & JOPT_SB), rsb = !!(g_jopt & JOPT_RSB);
@@ -23,6 +46,8 @@ static void jtranslate(u64 pc) {                          /* the caller is not a
         JI *j = &ji[n];
         if (!jdecode(j, ip)) { memset(j, 0, sizeof *j); j->ip = ip; j->op = JO_FBT; j->fr = j->fw = 1; n++; break; }
         n++;
+        if (j->op == JO_JCC) { j->dt = (u8) jflags_dead(j->target, ji, n); j->dn = (u8) jflags_dead(j->ip + j->len, ji, n); }
+        else if (j->op == JO_JMP) j->dt = (u8) jflags_dead(j->target, ji, n);
         /* Superblock: keep translating along the likely path. Only addresses on pages this block already reads are followed, so that
          * decoding never touches a page the guest has not reached yet (it could be unmapped: the fault belongs to the guest, later). */
         if (j->op == JO_JMP && sb && n < JMAXI && (j->target & 0xfff) <= 4096 - 16) {
@@ -43,6 +68,7 @@ static void jtranslate(u64 pc) {                          /* the caller is not a
         if (jterm(j)) break;
     }
     u64 endip = ip;
+    if (n && !jterm(&ji[n - 1])) ji[n - 1].dn = (u8) jflags_dead(endip, ji, n);       /* the block ends by falling through */
     pthread_mutex_lock(&jmu);
     if (jfind(pc)) { pthread_mutex_unlock(&jmu); return; }       /* another thread was faster */
     if ((u64)(jlim - jcur) < 2 * JBLOCK_MAX || jmapn + 4 * JMAXI > JMAP_CAP || jhn * 2 > (1u << JH_BITS)) jit_stw_locked();
@@ -62,10 +88,21 @@ static void jtranslate(u64 pc) {                          /* the caller is not a
 #else
     int live = 1;
 #endif
+    if (ji[n - 1].op == JO_JMP) live = !ji[n - 1].dt;                 /* the exits of the last instruction: dead when the code they lead to overwrites the flags first */
+    else if (!jterm(&ji[n - 1])) live = !ji[n - 1].dn;
     for (int i = n - 1; i >= 0; i--) {
         ji[i].lva = (u8) live;
         if (ji[i].fr) live = 1; else if (ji[i].fw) live = 0;
         ji[i].lvb = (u8) live;
+    }
+    for (int i = 0; i + 1 < n; i++) {                                 /* a flag producer read only by the jcc right after it, whose exits all find the flags dead */
+        const JI *c = &ji[i + 1];
+        if (c->op != JO_JCC || !(g_jopt & JOPT_FUSE)) continue;
+        int freeexit = c->cnt ? (!c->lva && c->dt) : (c->dt && c->dn);
+        int kind = jfuse_form(&ji[i]);
+        if (kind < 0 || !jmap_ok(kind, c->t)) continue;
+        if (freeexit) ji[i].fuse = 1;
+        else if (ji[i].sz >= 4) ji[i].fuse = 2;                       /* the exits that may read the flags rebuild them (fl_mat) */
     }
     u32 *start = jcur;
     jt_start = start; jt_pc = pc;
@@ -76,7 +113,7 @@ static void jtranslate(u64 pc) {                          /* the caller is not a
         __atomic_store_n(&jmapn, k + 1, __ATOMIC_RELEASE);          /* the entry is complete before the fault handler of another thread can see it */
         ended = jemit(&ji[i]);
     }
-    if (!ended) { fl_flush(1); jx_direct(ji[n - 1].ip, endip); }
+    if (!ended) { fl_flush(ji[n - 1].lva); jx_direct(ji[n - 1].ip, endip); }
     jstubs_emit();
     jst_blocks++; jst_ins += (unsigned) n; jst_words += (unsigned long long)(jcur - start);
     j_sync_icache(start, jcur);
@@ -199,11 +236,18 @@ static void jit_post_syscall(CPU *c, u64 n, long r) {
     }
     pthread_mutex_unlock(&jmu);
 }
+#ifdef PEMU_JIT_PROF
+static void jit_prof_report(void);
+#endif
 static void jit_report(void) {
+#ifdef PEMU_JIT_PROF
+    jit_prof_report();
+#endif
     if (!g_jstats) return;
     g_jstats = 0;
     fprintf(stderr, "pemu jit: %llu blocks, %llu guest instructions translated (%.1f AArch64 instructions each), %llu chained exits, %llu cache flushes\n",
             jst_blocks, jst_ins, jst_ins ? (double) jst_words / (double) jst_ins : 0.0, jst_chain, jst_flush);
+    fprintf(stderr, "pemu jit: %llu flag producers fused with their jcc, %llu jcc exits that skip the flag spill (flags dead there)\n", jst_fused, jst_xdead);
     fprintf(stderr, "pemu jit: %u translated instructions fall back to the interpreter; opcodes by number of sites:", jst_fb);
     for (int k = 0; k < 8; k++) {
         int b = -1; for (int i = 0; i < 512; i++) if (jfbh[i] && (b < 0 || jfbh[i] > jfbh[b])) b = i;
@@ -312,3 +356,6 @@ static void jit_atfork(int phase) {                               /* 0 before fo
     if (phase == 2) { jreg = t_jt.ic ? &t_jt : NULL; t_jt.next = NULL; }      /* the other threads do not exist in the child */
     pthread_mutex_unlock(&jmu);
 }
+#ifdef PEMU_JIT_PROF
+#include "tests/jit_prof.inc.h"
+#endif

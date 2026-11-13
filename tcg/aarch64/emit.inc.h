@@ -6,6 +6,25 @@ static inline void E(u32 w) { *jcur++ = w; }
 static void a_movz(int sf, int rd, u32 imm, int hw) { E(SFB(sf) | 0x52800000u | (u32) hw << 21 | (imm & 0xffff) << 5 | (u32) rd); }
 static void a_movk(int sf, int rd, u32 imm, int hw) { E(SFB(sf) | 0x72800000u | (u32) hw << 21 | (imm & 0xffff) << 5 | (u32) rd); }
 static void a_movn(int sf, int rd, u32 imm, int hw) { E(SFB(sf) | 0x12800000u | (u32) hw << 21 | (imm & 0xffff) << 5 | (u32) rd); }
+/* AArch64 logical immediate (bitmask): a rotated run of ones repeated in 2, 4, 8, 16, 32 or 64 bit elements. For sf = 0 the value is the low 32 bits.
+ * opc 0 and, 1 orr, 2 eor, 3 ands. Returns 1 and emits one instruction, or 0 (nothing emitted) when v has no such form. rd 31 is sp for 0..2, zr for ands. */
+static int a_logimm(int sf, int opc, int rd, int rn, u64 v) {
+    if (!sf) { v &= 0xffffffffULL; v |= v << 32; }
+    if (v == 0 || v == ~0ULL) return 0;
+    int e = 64;
+    while (e > 2) { int h = e / 2; u64 m = (1ULL << h) - 1; if ((v & m) != ((v >> h) & m)) break; e = h; }
+    u64 em = e == 64 ? ~0ULL : (1ULL << e) - 1, el = v & em;
+    int ones = __builtin_popcountll(el);
+    u64 run = ones == 64 ? ~0ULL : (1ULL << ones) - 1;
+    for (int r = 0; r < e; r++) {
+        u64 rot = r == 0 ? run : (((run >> r) | (run << (e - r))) & em);       /* ror within the element */
+        if (rot != el) continue;
+        u32 imms = (u32)((~(2 * e - 1) | (ones - 1)) & 0x3f), N = e == 64;
+        E(SFB(sf) | (u32) opc << 29 | 0x12000000u | N << 22 | (u32) r << 16 | imms << 10 | (u32) rn << 5 | (u32) rd);
+        return 1;
+    }
+    return 0;
+}
 static void a_movi(int rd, u64 v) {                       /* any 64-bit constant, 1-4 instructions, never touches the flags */
     int nz = 0, nzn = 0, first = 1;
     for (int h = 0; h < 4; h++) { nz += ((v >> (16 * h)) & 0xffff) != 0; nzn += ((~v >> (16 * h)) & 0xffff) != 0; }

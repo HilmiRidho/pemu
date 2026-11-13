@@ -2,10 +2,11 @@
 /* ------------------------------------------------------------ decoder (static, no guest state) */
 enum { OT_NONE, OT_REG, OT_MEM, OT_IMM };
 enum { JO_FB, JO_FBT, JO_NOP, JO_MOV, JO_MOVX, JO_LEA, JO_PUSH, JO_POP, JO_ALU, JO_NOT, JO_NEG, JO_SHIFT, JO_IMUL,
-       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_BT, JO_XRR, JO_DF, JO_XLH, JO_POPCNT, JO_PSHUFB, JO_PTEST, JO_XABS, JO_PMOVX, JO_CVTTF2SI, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
+       JO_SETCC, JO_CMOV, JO_CWDE, JO_CDQ, JO_LEAVE, JO_XLD, JO_XST, JO_XLOG, JO_XMOVDLD, JO_XMOVDST, JO_XVEC, JO_PMOVMSKB, JO_XSHI, JO_FMOV, JO_FARITH, JO_CVTSI2F, JO_FCVTF, JO_FCMP, JO_DIV, JO_XDUP, JO_BSF, JO_MUL1, JO_BSWAP, JO_XSHN, JO_XSHUF, JO_MMSHUF, JO_XCHG, JO_XCHGA, JO_CMPXCHG, JO_XADD, JO_XMOVQ, JO_BT, JO_XRR, JO_DF, JO_XLH, JO_POPCNT, JO_PSHUFB, JO_XPALIGN, JO_PTEST, JO_XABS, JO_PMOVX, JO_CVTTF2SI, JO_JMP, JO_JCC, JO_CALL, JO_RET, JO_JMPI, JO_CALLI };
 typedef struct {
     u64 ip, imm, target; s64 disp;
     u8 len, op, sz, sz2, t, fr, fw, at, bt, ar, br, rex, lva, lvb, scale, seg, sx, cnt, nost, incdec, mmx, lk;
+    u8 dt, dn, fuse;                      /* dt / dn: the flags are dead at the taken / fall-through exit (see jflags_dead); fuse: flag producer whose only reader is the next jcc (j_alu_fused) */
     s8 base, index;
 } JI;
 typedef struct { int reg, rm, ismem; } JM;
@@ -441,6 +442,10 @@ static int jdecode(JI *j, u64 ip) {
             if (!(g_jopt & JOPT_MISC) || !p66 || pf3 || pf2) FB();
             u8 o3 = *p++; jmodrm(&p, j, &m, 0); if (BADM(m) || !jsse38(j, o3, m.ismem)) FB();
             j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); break; }
+        case 0x3A: {                                         /* palignr xmm, xmm/m128, imm8 (the other 0F 3A instructions stay with the interpreter) */
+            if (!(g_jopt & JOPT_MISC) || !p66 || pf3 || pf2 || *p != 0x0F) FB();
+            p++; jmodrm(&p, j, &m, 1); if (BADM(m)) FB();
+            j->op = JO_XPALIGN; j->at = OT_REG; j->ar = (u8) m.reg; SETRM(m, 1); j->imm = *p++; break; }
         case 0xD7:
             if (!(p66 && !pf3 && !pf2)) FB();
             jmodrm(&p, j, &m, 0); if (m.ismem || lock) FB();
